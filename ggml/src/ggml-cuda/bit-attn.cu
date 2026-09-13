@@ -21,6 +21,8 @@ void ggml_cuda_op_bit_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * ds
 
 #else
 
+#include <math_constants.h> // CUDART_INF_F (NVIDIA only)
+
 // Layout is passed by value: views/non-contiguous Q, K, V and masks retain their
 // byte strides. Packed words use I32 storage but unsigned bitwise arithmetic.
 struct bit_view {
