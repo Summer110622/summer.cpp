@@ -1,8 +1,8 @@
-name: Retry serial MoE validation # 既存の適用手順を正しいビルド対象で再検証する。
+name: Retry serial MoE validation # 既存の適用手順をライブラリ本体で再検証する。
 on: # この一時ワークフローの起動条件を定義する。
-  push: # ファイル追加時のpushだけで起動する。
+  push: # ファイル更新時のpushだけで起動する。
     branches: [feat/serial-moe-experts] # Serial MoE作業ブランチだけを対象にする。
-    paths: ['.github/workflows/serial-moe-retry.yml'] # 自身の追加時だけ実行して再帰を防ぐ。
+    paths: ['.github/workflows/serial-moe-retry.yml'] # 自身の更新時だけ実行して再帰を防ぐ。
 permissions: # 必要な権限を最小化する。
   contents: write # 検証済み実装を作業ブランチへコミットするため書き込みを許可する。
 jobs: # 再適用とビルド検証をまとめる。
@@ -18,9 +18,9 @@ jobs: # 再適用とビルド検証をまとめる。
           sed -n "/python3 - <<'PY'/,/^          PY$/p" .github/workflows/serial-moe-apply.yml | sed '1d;$d;s/^          //' > "$RUNNER_TEMP/apply.py" # 既存変換スクリプトを重複なしで抽出する。
           python3 "$RUNNER_TEMP/apply.py" # 同じソース変換と文書生成を実行する。
       - name: Configure CPU build # CPU専用の最小ビルド構成を生成する。
-        run: cmake -S . -B build-serial -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_CUDA=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=OFF -DLLAMA_OPENSSL=OFF # 共通グラフとアプリ本体を検証できる構成にする。
-      - name: Build application # このforkで実在するアプリケーションターゲットをコンパイルする。
-        run: cmake --build build-serial --parallel 3 --target llama-app # Serial MoEコードを含むライブラリと実行ファイルをリンクする。
+        run: cmake -S . -B build-serial -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_CUDA=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_OPENSSL=OFF # 共通MoEグラフを含むライブラリ本体だけを検証する構成にする。
+      - name: Build llama library # Serial MoE経路を含むライブラリ本体をコンパイルしてリンクする。
+        run: cmake --build build-serial --parallel 3 --target llama # フロントエンド固有のリンク条件を除外して共有推論コードを検証する。
       - name: Commit verified implementation # ビルド成功後だけ実装を保存する。
         run: | # Git検査とコミットを連続して行う。
           git diff --check # whitespace破損がないことを確認する。
