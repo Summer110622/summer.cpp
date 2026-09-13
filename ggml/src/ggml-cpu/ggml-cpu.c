@@ -2022,6 +2022,18 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_fill(params, tensor);
             } break;
+        case GGML_OP_BIT_PACK:
+            {
+                ggml_compute_forward_bit_pack(params, tensor);
+            } break;
+        case GGML_OP_BIT_MUL_MAT:
+            {
+                ggml_compute_forward_bit_mul_mat(params, tensor);
+            } break;
+        case GGML_OP_BIT_ATTN_EXT:
+            {
+                ggml_compute_forward_bit_attn_ext(params, tensor);
+            } break;
         case GGML_OP_FLASH_ATTN_EXT:
             {
                 ggml_compute_forward_flash_attn_ext(params, tensor);
@@ -2421,6 +2433,9 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_TIMESTEP_EMBEDDING:
         case GGML_OP_ARGSORT:
         case GGML_OP_TOP_K:
+        case GGML_OP_BIT_PACK:
+        case GGML_OP_BIT_MUL_MAT:
+        case GGML_OP_BIT_ATTN_EXT:
         case GGML_OP_FLASH_ATTN_EXT:
         case GGML_OP_FLASH_ATTN_BACK:
         case GGML_OP_SSM_CONV:

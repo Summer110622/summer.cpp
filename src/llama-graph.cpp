@@ -2613,7 +2613,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     ggml_tensor * cur;
 
     const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
-    if (use_flash_attn) {
+    const bool use_bit_fused = cparams.bit_attn && kq_b == nullptr && arch != LLM_ARCH_GROK;
+    if (use_bit_fused || (!cparams.bit_attn && use_flash_attn)) {
         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
 
         if (v_trans) {
@@ -2621,22 +2622,31 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         }
 
         // this can happen when KV cache is not used (e.g. an embedding model with non-causal attn)
-        if (k->type == GGML_TYPE_F32) {
+        // Bit packing must see the original signs, without F16 underflow to -0.
+        if (!use_bit_fused && k->type == GGML_TYPE_F32) {
             k = ggml_cast(ctx0, k, GGML_TYPE_F16);
         }
 
-        if (v->type == GGML_TYPE_F32) {
+        if (!use_bit_fused && v->type == GGML_TYPE_F32) {
             v = ggml_cast(ctx0, v, GGML_TYPE_F16);
         }
 
-        cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
-                                  hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
-        res->add_fused_node({LLM_FUSED_OP_FLASH_ATTN, cur, il});
+        if (use_bit_fused) {
+            GGML_ASSERT(q->ne[0] <= INT32_MAX);
+            cur = ggml_bit_attn_ext(ctx0, ggml_bit_pack(ctx0, q), ggml_bit_pack(ctx0, k), v,
+                    kq_mask, sinks, static_cast<int32_t>(q->ne[0]), kq_scale, hparams.f_max_alibi_bias,
+                    hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
+            cb(cur, "bit_attn", il);
+        } else {
+            cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
+                                      hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
+            res->add_fused_node({LLM_FUSED_OP_FLASH_ATTN, cur, il});
 
-        ggml_flash_attn_ext_add_sinks(cur, sinks);
-        GGML_ASSERT(n_kv_max >= 0 && n_kv_max <= INT32_MAX);
-        ggml_flash_attn_ext_set_n_kv_max(cur, static_cast<int32_t>(n_kv_max));
-        ggml_prec_set_acc(cur, GGML_PREC_F32);
+            ggml_flash_attn_ext_add_sinks(cur, sinks);
+            GGML_ASSERT(n_kv_max >= 0 && n_kv_max <= INT32_MAX);
+            ggml_flash_attn_ext_set_n_kv_max(cur, static_cast<int32_t>(n_kv_max));
+            ggml_prec_set_acc(cur, GGML_PREC_F32);
+        }
 
         if (v_mla) {
 #if 0
@@ -2657,7 +2667,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
     } else {
-        ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
+        // Keep model-specific bias/softcap ordering on the unfused path.
+        GGML_ASSERT(!cparams.bit_attn || q->ne[0] <= INT32_MAX);
+        ggml_tensor * kq = cparams.bit_attn
+            ? ggml_bit_mul_mat(ctx0, ggml_bit_pack(ctx0, k), ggml_bit_pack(ctx0, q), static_cast<int32_t>(q->ne[0]))
+            : ggml_mul_mat(ctx0, k, q);
         cb(kq, "kq", il);
 
         // note: this op tends to require high floating point range
@@ -2721,6 +2735,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         }
     }
 
+    if (cparams.bit_attn && !cparams.offload_kqv) {
+        ggml_backend_sched_set_tensor_backend(sched, cur, backend_cpu);
+    }
     ggml_build_forward_expand(gf, cur);
 
     return cur;

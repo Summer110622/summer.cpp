@@ -601,6 +601,11 @@ extern "C" {
 
         GGML_OP_GLU,
 
+        // Experimental sign-only Q/K attention. Append to preserve existing op IDs.
+        GGML_OP_BIT_PACK,
+        GGML_OP_BIT_MUL_MAT,
+        GGML_OP_BIT_ATTN_EXT,
+
         GGML_OP_COUNT,
     };
 
@@ -2484,6 +2489,43 @@ extern "C" {
     //   n_head % ne32      == 0
     //   ne3    % ne33      == 0
     //
+    // Experimental, inference-only binary Q/K operations (not numerically equivalent to SDPA).
+    // Pack x >= 0 as 1, x < 0 as 0, least-significant bit first. Output is I32 with
+    // shape [ceil(D/32), N, H, B]; unused high bits are zero. Float and quantized
+    // inputs are accepted; quantized inputs are explicitly cast to F32 first.
+    GGML_API struct ggml_tensor * ggml_bit_pack(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * x);
+
+    // Packed K^T Q using D - 2*popcount(K xor Q). Same shape/broadcast rules as
+    // ggml_mul_mat: a=K, b=Q, output F32 [Nk, Nq, Hq, Bq]. Padding is ignored.
+    GGML_API struct ggml_tensor * ggml_bit_mul_mat(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            int32_t               head_dim);
+
+    // Fused online softmax over packed Q/K, keeping V floating point. Q/K are
+    // [ceil(D/32), N, H, B]; V is [Dv, Nk, Hv, Bv]; output F32 [Dv, Hq, Nq, Bq].
+    // GQA/batch broadcasting follows ggml_mul_mat. Mask is an additive F16/F32/
+    // BF16 tensor [>=Nk, >=Nq, Hm, Bm], with heads/batches repeated modulo Hm/Bm.
+    // Callers encode causal/padding/sliding-window positions in mask, including
+    // absolute decode offsets. Mask entries must be finite or -INFINITY.
+    // Sinks: optional F32 vector [Hq], contributes only to the denominator.
+    // Scores: softcap(scale * binary_dot) + alibi_slope * mask.
+    // All-masked rows return zero. No dropout/backward/STE is provided.
+    GGML_API struct ggml_tensor * ggml_bit_attn_ext(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * mask,
+            struct ggml_tensor  * sinks,
+            int32_t               head_dim,
+            float                 scale,
+            float                 max_bias,
+            float                 logit_softcap);
+
     GGML_API struct ggml_tensor * ggml_flash_attn_ext(
             struct ggml_context * ctx,
             struct ggml_tensor  * q,

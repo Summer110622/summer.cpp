@@ -189,8 +189,11 @@ ggml_tensor * llama_model_minimax_m3::graph::build_attn_msa_fa(
     ggml_tensor * q = ggml_reshape_4d(ctx0, q_cur, D, Gp, C, R);
     q = ggml_permute(ctx0, q, 0, 2, 3, 1);
 
-    ggml_tensor * o = ggml_flash_attn_ext(ctx0, q, k, v, mask, kq_scale,
-                                          hparams.f_max_alibi_bias, 0.0f);
+    GGML_ASSERT(!cparams.bit_attn || D <= INT32_MAX);
+    ggml_tensor * o = cparams.bit_attn
+        ? ggml_bit_attn_ext(ctx0, ggml_bit_pack(ctx0, q), ggml_bit_pack(ctx0, k), v,
+                mask, nullptr, static_cast<int32_t>(D), kq_scale, hparams.f_max_alibi_bias, 0.0f)
+        : ggml_flash_attn_ext(ctx0, q, k, v, mask, kq_scale, hparams.f_max_alibi_bias, 0.0f);
     ggml_prec_set_acc(o, GGML_PREC_F32);
     cb(o, "msa_fattn", il);
 

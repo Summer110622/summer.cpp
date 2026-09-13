@@ -1748,6 +1748,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.n_chunks = value;
         }
     ).set_examples({LLAMA_EXAMPLE_IMATRIX, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_RETRIEVAL}));
+    add_opt(common_arg(
+        {"--bit-attn"}, {"--no-bit-attn"},
+        "experimental sign-only Q/K BitAttention (changes model numerics; default: disabled)",
+        [](common_params & params, bool value) {
+            params.bit_attn = value;
+        }
+    ).set_env("LLAMA_ARG_BIT_ATTN"));
     add_opt(common_arg({ "-fa", "--flash-attn" }, "[on|off|auto]",
                        string_format("set Flash Attention use ('on', 'off', or 'auto', default: '%s')",
                                      llama_flash_attn_type_name(params.flash_attn_type)),

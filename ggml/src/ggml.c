@@ -1099,9 +1099,13 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_SGD",
 
     "GLU",
+
+    "BIT_PACK",
+    "BIT_MUL_MAT",
+    "BIT_ATTN_EXT",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1214,9 +1218,13 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "sgd(x)",
 
     "glu(x)",
+
+    "bit_pack(x)",
+    "bit_mul_mat(x,y)",
+    "bit_attn_ext(x)",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -5489,6 +5497,84 @@ struct ggml_tensor * ggml_arange(
 
     result->op = GGML_OP_ARANGE;
 
+    return result;
+}
+
+// Experimental sign-only Q/K attention. Parameters are serialized as ordinary
+// ggml op_params; there are no function pointers or process-global mode switches.
+static bool ggml_bit_float_type(enum ggml_type type) {
+    return type == GGML_TYPE_F32 || type == GGML_TYPE_F16 || type == GGML_TYPE_BF16;
+}
+
+struct ggml_tensor * ggml_bit_pack(struct ggml_context * ctx, struct ggml_tensor * x) {
+    if (ggml_is_quantized(x->type)) {
+        x = ggml_cast(ctx, x, GGML_TYPE_F32);
+    }
+    GGML_ASSERT(ggml_bit_float_type(x->type));
+    GGML_ASSERT(!ggml_is_empty(x));
+    int64_t ne[4] = { (x->ne[0] + 31)/32, x->ne[1], x->ne[2], x->ne[3] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_I32, 4, ne);
+    result->op = GGML_OP_BIT_PACK;
+    result->src[0] = x;
+    return result;
+}
+
+static void ggml_bit_check_qk(const struct ggml_tensor * q, const struct ggml_tensor * k, int32_t d) {
+    GGML_ASSERT(d > 0);
+    GGML_ASSERT(q->type == GGML_TYPE_I32 && k->type == GGML_TYPE_I32);
+    GGML_ASSERT(!ggml_is_empty(q) && !ggml_is_empty(k));
+    GGML_ASSERT(q->ne[0] == ((int64_t) d + 31)/32 && k->ne[0] == q->ne[0]);
+    GGML_ASSERT(q->ne[2] % k->ne[2] == 0 && q->ne[3] % k->ne[3] == 0);
+}
+
+struct ggml_tensor * ggml_bit_mul_mat(
+        struct ggml_context * ctx, struct ggml_tensor * a, struct ggml_tensor * b, int32_t head_dim) {
+    ggml_bit_check_qk(b, a, head_dim);
+    int64_t ne[4] = { a->ne[1], b->ne[1], b->ne[2], b->ne[3] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+    result->op = GGML_OP_BIT_MUL_MAT;
+    result->src[0] = a;
+    result->src[1] = b;
+    ggml_set_op_params_i32(result, 0, head_dim);
+    return result;
+}
+
+struct ggml_tensor * ggml_bit_attn_ext(
+        struct ggml_context * ctx,
+        struct ggml_tensor * q, struct ggml_tensor * k, struct ggml_tensor * v,
+        struct ggml_tensor * mask, struct ggml_tensor * sinks,
+        int32_t head_dim, float scale, float max_bias, float logit_softcap) {
+    ggml_bit_check_qk(q, k, head_dim);
+    GGML_ASSERT(isfinite(scale) && isfinite(max_bias) && isfinite(logit_softcap));
+    GGML_ASSERT(max_bias >= 0.0f && logit_softcap >= 0.0f);
+    if (ggml_is_quantized(v->type)) {
+        v = ggml_cast(ctx, v, GGML_TYPE_F32);
+    }
+    GGML_ASSERT(ggml_bit_float_type(v->type) && !ggml_is_empty(v));
+    GGML_ASSERT(v->ne[1] == k->ne[1]);
+    GGML_ASSERT(q->ne[2] % v->ne[2] == 0 && q->ne[3] % v->ne[3] == 0);
+    if (mask) {
+        GGML_ASSERT(ggml_bit_float_type(mask->type) && !ggml_is_empty(mask));
+        GGML_ASSERT(mask->ne[0] >= k->ne[1] && mask->ne[1] >= q->ne[1]);
+        GGML_ASSERT(q->ne[2] % mask->ne[2] == 0 && q->ne[3] % mask->ne[3] == 0);
+    }
+    GGML_ASSERT(max_bias == 0.0f || mask);
+    if (sinks) {
+        GGML_ASSERT(sinks->type == GGML_TYPE_F32 && ggml_is_vector(sinks));
+        GGML_ASSERT(sinks->ne[0] == q->ne[2]);
+    }
+    int64_t ne[4] = { v->ne[0], q->ne[2], q->ne[1], q->ne[3] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+    result->op = GGML_OP_BIT_ATTN_EXT;
+    result->src[0] = q;
+    result->src[1] = k;
+    result->src[2] = v;
+    result->src[3] = mask;
+    result->src[4] = sinks;
+    ggml_set_op_params_f32(result, 0, scale);
+    ggml_set_op_params_f32(result, 1, max_bias);
+    ggml_set_op_params_f32(result, 2, logit_softcap);
+    ggml_set_op_params_i32(result, 3, head_dim);
     return result;
 }
 

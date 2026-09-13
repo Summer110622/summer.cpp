@@ -182,7 +182,10 @@ llama_model_wavtokenizer_dec::graph::graph(const llama_model & model, const llm_
                     q = ggml_cont(ctx0, ggml_transpose(ctx0, q));
                     k = ggml_cont(ctx0, ggml_transpose(ctx0, k));
 
-                    ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
+                    GGML_ASSERT(!cparams.bit_attn || q->ne[0] <= INT32_MAX);
+                    ggml_tensor * kq = cparams.bit_attn
+                        ? ggml_bit_mul_mat(ctx0, ggml_bit_pack(ctx0, k), ggml_bit_pack(ctx0, q), static_cast<int32_t>(q->ne[0]))
+                        : ggml_mul_mat(ctx0, k, q);
 
                     kq = ggml_soft_max_ext(ctx0, kq, nullptr, 1.0f/sqrtf(float(hparams.posnet.n_embd)), 0.0f);
 

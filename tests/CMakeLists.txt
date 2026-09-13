@@ -381,3 +381,18 @@ if (TARGET gguf-model-data)
     target_link_libraries(test-export-graph-ops PRIVATE gguf-model-data)
     target_compile_definitions(test-export-graph-ops PRIVATE LLAMA_HF_FETCH)
 endif()
+
+# Independent double-precision oracle; no model files or network required.
+add_executable(test-bit-attention test-bit-attention.cpp)
+target_link_libraries(test-bit-attention PRIVATE ggml)
+llama_test(test-bit-attention LABEL bit-attention)
+set_tests_properties(test-bit-attention PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(test-bit-attention-model test-bit-attention-model.cpp)
+target_compile_features(test-bit-attention-model PRIVATE cxx_std_17)
+target_link_libraries(test-bit-attention-model PRIVATE llama)
+llama_test(test-bit-attention-model LABEL bit-attention)
+
+add_executable(test-bit-attention-args test-bit-attention-args.cpp)
+target_link_libraries(test-bit-attention-args PRIVATE llama-common)
+llama_test(test-bit-attention-args LABEL bit-attention)
