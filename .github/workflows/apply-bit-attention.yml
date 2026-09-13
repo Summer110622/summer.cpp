@@ -1,0 +1,33 @@
+name: Apply verified BitAttention patch # ローカル検証済みの固定差分を専用ブランチへ一度だけ反映する。
+on: # 固定された転送ファイルの到着だけを実行契機にする。
+  push: # 専用ブランチへのpushだけを処理する。
+    branches: [feat/bit-attention-20260913] # masterや他のブランチへは反映しない。
+    paths: ['.bit-attention-bootstrap/**'] # 一時転送ファイル以外の変更では起動しない。
+permissions: # 固定差分を同じブランチへコミットする権限だけを指定する。
+  contents: write # 検証済みコードのコミットを作成してpushする。
+jobs: # 一度だけ実行するパッチ適用処理を定義する。
+  apply: # ハッシュ検証後の差分だけを反映する。
+    if: github.repository == 'Summer110622/summer.cpp' && github.ref == 'refs/heads/feat/bit-attention-20260913' # 対象リポジトリとブランチを固定する。
+    runs-on: ubuntu-latest # 標準的なGitとxzを持つLinuxランナーを使用する。
+    timeout-minutes: 10 # 一時適用ジョブの実行時間を制限する。
+    steps: # ソース取得・検証・反映を順番に実行する。
+      - uses: actions/checkout@v4 # このpushで届いた固定コミットを取得する。
+        with: # 初期基準と親コミットの検証に必要な履歴だけを取得する。
+          fetch-depth: 3 # 現在・親・初期基準の3コミットを取得する。
+      - name: Apply checksum-pinned source patch # 任意のコマンドではなく固定ハッシュの差分だけを適用する。
+        shell: bash # パイプ中のエラーを正しく伝播するシェルを指定する。
+        run: | # 各行に対応する検証と反映を実行する。
+          set -euo pipefail # コマンド失敗や未定義変数を検出する。
+          test "$(git rev-parse HEAD^)" = 202ab7fabdc619760cfb61daa5c07869dbb5f00f # 検証済み基準からの最初の転送コミットであることを確認する。
+          cat .bit-attention-bootstrap/part{0,1,2,3}.b64 | base64 --decode | xz --decompress > "$RUNNER_TEMP/bit-attention.patch" # 順序を固定してソース差分を復元する。
+          printf '%s  %s\n' a4eb9b083f19a3602b8419f806613cf57bcf986b4d96b51d8d9e0a99040ba3a2 "$RUNNER_TEMP/bit-attention.patch" | sha256sum --check - # ローカルでビルド・テストした差分とbyte単位で同一であることを検証する。
+          git apply --index --check "$RUNNER_TEMP/bit-attention.patch" # ファイル競合や基準の不一致がないことを確認する。
+          git apply --index "$RUNNER_TEMP/bit-attention.patch" # 検証されたコード差分を作業ツリーとindexへ適用する。
+          git restore --source=HEAD --staged --worktree .github/workflows/bit-attention.yml # CI定義は利用者のGitHub接続から別途更新しこのジョブでは変更しない。
+          git rm -r .bit-attention-bootstrap # 転送済みの一時ファイルを最終ソースから除外する。
+          python3 scripts/check-bit-attention-comments.py 5265486cb491ea5b160a3d20ca1e105ae5422312 # コミット前に追加コード全行の説明コメントを再検査する。
+          git diff --cached --check # 空白エラーを含む差分をコミットしないよう検査する。
+          git config user.name 'github-actions[bot]' # CIによる機械的適用であることをコミット履歴に残す。
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com' # GitHub標準botの公開メールを使用する。
+          git commit -m 'feat: integrate opt-in CPU/CUDA bit attention with fully commented code' # カーネル・統合・テスト・文書を1つの実装コミットにまとめる。
+          git push origin HEAD:refs/heads/feat/bit-attention-20260913 # 強制更新せず専用ブランチだけをfast-forwardする。
