@@ -1,4 +1,4 @@
-name: Apply verified BitAttention patch
+name: Apply BitAttention RPC compatibility guard
 
 on:
   push:
@@ -11,44 +11,50 @@ permissions:
 jobs:
   apply:
     if: github.repository == 'Summer110622/summer.cpp' && github.ref == 'refs/heads/feat/bit-attention-kernel'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           ref: feat/bit-attention-kernel
-      - name: Reconstruct and verify the locally tested patch
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Apply checked RPC compatibility edits
         run: |
           python3 - <<'PY'
-          import base64, gzip, hashlib, json, os, pathlib, subprocess
-          repo = 'Summer110622/summer.cpp'
-          shas = ['18646e572a1a1ea2a14a847f0442dd9259b1b2c7',
-                  '12e173280a743fc4d05217bd424ddc7b45d8f921',
-                  'be09053232a8590cb2cba514ddc1267238b6abb8']
-          chunks = []
-          for sha in shas:
-              obj = json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/git/blobs/{sha}']))
-              chunks.append(base64.b64decode(obj['content']))
-          # Correct the identified one-character transport insertion in chunk 0.
-          encoded = base64.b64encode(chunks[0]).decode()
-          assert encoded.count('ulKXfxKK3') == 1
-          chunks[0] = base64.b64decode(encoded.replace('ulKXfxKK3', 'ulKXfxK3', 1) + 'J', validate=True)
-          assert hashlib.sha1(b'blob 7206\0' + chunks[0]).hexdigest() == '1975fda46375a8f6848eebff07db958dbe38fe75'
-          patch = gzip.decompress(b''.join(chunks))
-          assert hashlib.sha256(patch).hexdigest() == 'ca4e3e024f97dd6a2637b22940196fd2762576c08302d4982191795d2127e242'
-          assert b'diff --git a/.github/' not in patch
-          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'bit-attention.patch'
-          path.write_bytes(patch)
-          subprocess.run(['git', 'apply', '--check', '--index', str(path)], check=True)
-          subprocess.run(['git', 'apply', '--index', str(path)], check=True)
+          from pathlib import Path
+          def replace(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              assert s.count(old) == 1, f'Expected exactly one match in {path}'
+              p.write_text(s.replace(old, new))
+          replace('ggml/include/ggml-rpc.h', 'RPC_PROTO_PATCH_VERSION    0', 'RPC_PROTO_PATCH_VERSION    1')
+          replace('ggml/include/ggml-rpc.h', 'GGML_OP_COUNT == 101', 'GGML_OP_COUNT == 104')
+          replace('ggml/src/ggml-rpc/ggml-rpc.cpp',
+                  '''static bool ggml_backend_rpc_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
+              GGML_UNUSED(dev);
+              GGML_UNUSED(op);
+              //TODO: call the remote backend and cache the results
+              return true;
+          }''',
+                  '''static bool ggml_backend_rpc_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
+              GGML_UNUSED(dev);
+              // RPC does not negotiate per-op backend capabilities. Do not send new
+              // BitAttention IDs to an older server or assume its device supports them.
+              // The scheduler can run these experimental ops on the local CPU instead.
+              if (op->op == GGML_OP_BIT_PACK || op->op == GGML_OP_BIT_MUL_MAT || op->op == GGML_OP_BIT_ATTN_EXT) {
+                  return false;
+              }
+              //TODO: call the remote backend and cache the results
+              return true;
+          }''')
+          replace('docs/experimental/bit-attention.md',
+                  'other value dimensions and non-NVIDIA accelerator backends use CPU fallback.',
+                  'other value dimensions and non-NVIDIA accelerator backends use CPU fallback.\n'
+                  'RPC does not negotiate per-op backend capabilities, so the new operations run\n'
+                  'on the local CPU rather than being sent to an unsupported remote backend.')
           PY
-      - name: Commit only verified implementation changes
-        run: |
+          git add ggml/include/ggml-rpc.h ggml/src/ggml-rpc/ggml-rpc.cpp docs/experimental/bit-attention.md
           git diff --cached --check
-          git diff --cached --stat
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'feat: integrate experimental native binary-QK attention across ggml and llama'
+          git commit -m 'fix: keep BitAttention off unsupported RPC devices and update op ABI check'
           git push origin HEAD:feat/bit-attention-kernel
