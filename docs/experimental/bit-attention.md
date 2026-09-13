@@ -82,6 +82,8 @@ FP32 accumulation, **not a tuned Tensor Core implementation**. It may be slower
 than existing FlashAttention; fewer logical dot-product operations are not an
 end-to-end speed guarantee. CUDA supports fused value dimensions up to 1024;
 other value dimensions and non-NVIDIA accelerator backends use CPU fallback.
+RPC does not negotiate per-op backend capabilities, so the new operations run
+on the local CPU rather than being sent to an unsupported remote backend.
 
 The persistent KV cache is unchanged. K is repacked on each graph evaluation;
 there is no new 1-bit cache type, incremental packed-cache update, serialized

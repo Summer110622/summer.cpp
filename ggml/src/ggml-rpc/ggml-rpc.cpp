@@ -2185,7 +2185,12 @@ static ggml_backend_buffer_type_t ggml_backend_rpc_device_get_buffer_type(ggml_b
 
 static bool ggml_backend_rpc_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
     GGML_UNUSED(dev);
-    GGML_UNUSED(op);
+    // RPC does not negotiate per-op backend capabilities. Do not send new
+    // BitAttention IDs to an older server or assume its device supports them.
+    // The scheduler can run these experimental ops on the local CPU instead.
+    if (op->op == GGML_OP_BIT_PACK || op->op == GGML_OP_BIT_MUL_MAT || op->op == GGML_OP_BIT_ATTN_EXT) {
+        return false;
+    }
     //TODO: call the remote backend and cache the results
     return true;
 }
