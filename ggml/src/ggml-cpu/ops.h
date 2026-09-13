@@ -95,6 +95,9 @@ void ggml_compute_forward_top_k(const struct ggml_compute_params * params, struc
 void ggml_compute_forward_leaky_relu(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_tri(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_fill(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_bit_pack(const struct ggml_compute_params * params, struct ggml_tensor * dst); // CPUスレッドで入力の符号を32ビット語へパックする。
+void ggml_compute_forward_bit_mul_mat(const struct ggml_compute_params * params, struct ggml_tensor * dst); // CPUで二値Query-Keyスコア行列を計算する。
+void ggml_compute_forward_bit_attn_ext(const struct ggml_compute_params * params, struct ggml_tensor * dst); // CPUで二値Q/Kとonline softmaxとV集計を融合する。
 void ggml_compute_forward_flash_attn_ext(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_flash_attn_back(
         const struct ggml_compute_params * params,

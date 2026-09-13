@@ -3,6 +3,7 @@
 #include "ggml-backend-impl.h"
 
 #include "ggml-cuda/allreduce.cuh"
+#include "ggml-cuda/bit-attn.cuh" // ggml-cuda/bit-attn.cuhの型と関数宣言を読み込む。
 #include "ggml-cuda/common.cuh"
 #include "ggml-cuda/acc.cuh"
 #include "ggml-cuda/add-id.cuh"
@@ -2355,6 +2356,15 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_ARGSORT:
             ggml_cuda_op_argsort(ctx, dst);
+            break; // 選択した演算の処理を終えてswitchを抜ける。
+        case GGML_OP_BIT_PACK: // 符号パックの演算番号を登録・選択する。
+            ggml_cuda_op_bit_pack(ctx, dst); // 対応するCUDA二値カーネルへ現在の演算を配送する。
+            break; // 選択した演算の処理を終えてswitchを抜ける。
+        case GGML_OP_BIT_MUL_MAT: // XOR/popcountによる二値内積行列の演算番号を登録・選択する。
+            ggml_cuda_op_bit_mul_mat(ctx, dst); // 対応するCUDA二値カーネルへ現在の演算を配送する。
+            break; // 選択した演算の処理を終えてswitchを抜ける。
+        case GGML_OP_BIT_ATTN_EXT: // online softmax付き融合二値Attentionの演算番号を登録・選択する。
+            ggml_cuda_op_bit_attn_ext(ctx, dst); // 対応するCUDA二値カーネルへ現在の演算を配送する。
             break;
         case GGML_OP_FLASH_ATTN_EXT:
             ggml_cuda_flash_attn_ext(ctx, dst);
@@ -5492,6 +5502,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
                 op->src[2]->type == GGML_TYPE_F32 && op->src[3]->type == GGML_TYPE_F32 &&
                 op->type == GGML_TYPE_F32;
+        case GGML_OP_BIT_PACK: // 符号パックの演算番号を登録・選択する。
+        case GGML_OP_BIT_MUL_MAT: // XOR/popcountによる二値内積行列の演算番号を登録・選択する。
+        case GGML_OP_BIT_ATTN_EXT: // online softmax付き融合二値Attentionの演算番号を登録・選択する。
+            return ggml_cuda_bit_attention_supported(op); // 新演算の型と形状の対応判定を専用CUDA実装へ委譲する。
         case GGML_OP_FLASH_ATTN_EXT:
             return ggml_cuda_flash_attn_ext_supported(dev_ctx->device, op);
         case GGML_OP_CROSS_ENTROPY_LOSS:

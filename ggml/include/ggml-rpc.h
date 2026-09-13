@@ -8,10 +8,10 @@ extern "C" {
 
 #define RPC_PROTO_MAJOR_VERSION    6
 #define RPC_PROTO_MINOR_VERSION    0
-#define RPC_PROTO_PATCH_VERSION    0
+#define RPC_PROTO_PATCH_VERSION    1 // 演算数の変更に合わせてRPC互換性検査用のパッチ番号を更新する。
 
 #ifdef  __cplusplus
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT has changed - update RPC_PROTO_PATCH_VERSION");
+static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT has changed - update RPC_PROTO_PATCH_VERSION"); // 三つの新演算を含む演算数と登録表・RPCの整合性をコンパイル時に検査する。
 #endif
 
 #define GGML_RPC_MAX_SERVERS       16
