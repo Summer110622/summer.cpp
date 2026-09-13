@@ -1,0 +1,31 @@
+name: Bit attention validation # BitAttention専用の再現可能な検証を定義する。
+on: # 実装ブランチの更新時と手動操作時に検証する。
+  push: # 実装ブランチへのコミットを検証対象にする。
+    branches: [feat/bit-attention-20260913] # 既存ブランチのCI設定には影響させない。
+  workflow_dispatch: {} # 必要なときに同じ検証を手動で再実行できる。
+permissions: # ソース取得に必要な最小権限を指定する。
+  contents: read # この検証ジョブ自身によるリポジトリ書き換えを禁止する。
+jobs: # 再現用ソース保存とCPU検証をまとめる。
+  cpu: # GPUを必要としないビルドと数値テストを実行する。
+    runs-on: ubuntu-latest # GitHub管理のLinuxランナーで実行する。
+    timeout-minutes: 30 # ビルドが停止した場合の実行時間に上限を設ける。
+    steps: # ソース取得から検証までを順番に実行する。
+      - uses: actions/checkout@v4 # 検証対象コミットのソースを取得する。
+        with: # チェックアウトの設定を指定する。
+          persist-credentials: false # 後続コマンドへGit認証情報を残さない。
+      - name: Archive exact source # 検証対象ソースを再現用に保存する。
+        run: tar --exclude=.git -czf "$RUNNER_TEMP/bit-attention-source.tar.gz" . # Git認証情報を除外してソースだけを圧縮する。
+      - uses: actions/upload-artifact@v4 # 検証対象と同一のソースを成果物として保存する。
+        with: # ソース成果物の保存先と保持期間を指定する。
+          name: bit-attention-source # ソース成果物を識別する名前を指定する。
+          path: ${{ runner.temp }}/bit-attention-source.tar.gz # 作成したソースアーカイブを指定する。
+          retention-days: 1 # 一時的な再現用成果物を長期間保存しない。
+      - name: Build and test CPU kernel # カーネル追加後にCPUビルドと数値検証を実行する。
+        shell: bash # エラー伝播を明示できるシェルを使用する。
+        run: | # 以下のシェル各行を同じ作業ディレクトリで実行する。
+          set -euo pipefail # コマンド失敗や未定義変数を検証失敗として扱う。
+          if test -f tests/test-bit-attention.cpp; then # 実装ファイルが追加されたコミットから数値検証を開始する。
+            cmake -S . -B build-bit-attention -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_EXAMPLES=OFF # ポータブルCPU構成のビルドを生成する。
+            cmake --build build-bit-attention --target test-bit-attention -j 2 # 新しいAttentionの数値検証ターゲットをコンパイルする。
+            ctest --test-dir build-bit-attention -R '^test-bit-attention$' --output-on-failure # 参照実装との一致を検証し失敗内容を表示する。
+          fi # カーネル追加後の条件付き検証を終了する。
