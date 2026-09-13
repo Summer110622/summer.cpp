@@ -47,6 +47,10 @@ jobs: # CPU実行とCUDAコンパイルを独立して検証する。
           name: bit-attention-source # 実行IDごとにソース成果物を識別する。
           path: ${{ runner.temp }}/bit-attention-source.tar.gz # 作成した圧縮アーカイブを保存する。
           retention-days: 1 # 再現用ソースを長期間保存しない。
+      - name: Check line explanations # 新規・変更コードの説明コメント漏れを検出する。
+        run: | # 機能追加前の固定コミットを読み取り専用で取得する。
+          git fetch --no-tags --depth=1 origin 5265486cb491ea5b160a3d20ca1e105ae5422312 # 比較元のコミットだけを取得する。
+          python3 tests/bit-attention-comments.py --base 5265486cb491ea5b160a3d20ca1e105ae5422312 # ソースと例示コードの全追加行を監査する。
       - name: Configure # CPUとRPCを含む検証用ビルドを生成する。
         run: cmake -S . -B build-bit -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_CUDA=OFF -DGGML_RPC=ON -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DLLAMA_OPENSSL=OFF # 特定CPU命令やモデルのダウンロードへ依存しない構成にする。
       - name: Build kernels, runtime and frontends # 数値テストだけでなく利用経路もコンパイルする。
