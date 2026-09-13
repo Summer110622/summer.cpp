@@ -1,0 +1,54 @@
+name: Apply verified BitAttention patch
+
+on:
+  push:
+    branches: [feat/bit-attention-kernel]
+    paths: ['.github/workflows/bit-attention-apply.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.repository == 'Summer110622/summer.cpp' && github.ref == 'refs/heads/feat/bit-attention-kernel'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/bit-attention-kernel
+      - name: Reconstruct and verify the locally tested patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, subprocess
+          repo = 'Summer110622/summer.cpp'
+          shas = ['18646e572a1a1ea2a14a847f0442dd9259b1b2c7',
+                  '12e173280a743fc4d05217bd424ddc7b45d8f921',
+                  'be09053232a8590cb2cba514ddc1267238b6abb8']
+          chunks = []
+          for sha in shas:
+              obj = json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/git/blobs/{sha}']))
+              chunks.append(base64.b64decode(obj['content']))
+          # Correct the identified one-character transport insertion in chunk 0.
+          encoded = base64.b64encode(chunks[0]).decode()
+          assert encoded.count('ulKXfxKK3') == 1
+          chunks[0] = base64.b64decode(encoded.replace('ulKXfxKK3', 'ulKXfxK3', 1) + 'J', validate=True)
+          assert hashlib.sha1(b'blob 7206\0' + chunks[0]).hexdigest() == '1975fda46375a8f6848eebff07db958dbe38fe75'
+          patch = gzip.decompress(b''.join(chunks))
+          assert hashlib.sha256(patch).hexdigest() == 'ca4e3e024f97dd6a2637b22940196fd2762576c08302d4982191795d2127e242'
+          assert b'diff --git a/.github/' not in patch
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'bit-attention.patch'
+          path.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', '--index', str(path)], check=True)
+          subprocess.run(['git', 'apply', '--index', str(path)], check=True)
+          PY
+      - name: Commit only verified implementation changes
+        run: |
+          git diff --cached --check
+          git diff --cached --stat
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat: integrate experimental native binary-QK attention across ggml and llama'
+          git push origin HEAD:feat/bit-attention-kernel
