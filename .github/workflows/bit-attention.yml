@@ -1,0 +1,40 @@
+name: Bit attention
+
+on:
+  push:
+    branches: [feat/bit-attention-kernel]
+    paths:
+      - '.github/workflows/bit-attention.yml'
+      - 'ggml/**'
+      - 'src/**'
+      - 'include/**'
+      - 'common/**'
+      - 'tests/**'
+      - 'scripts/bit-attention/**'
+  pull_request:
+    paths:
+      - '.github/workflows/bit-attention.yml'
+      - 'ggml/**'
+      - 'src/**'
+      - 'include/**'
+      - 'common/**'
+      - 'tests/**'
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Package exact source for offline validation
+        run: git archive HEAD | gzip > "$RUNNER_TEMP/bit-attention-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bit-attention-source
+          path: ${{ runner.temp }}/bit-attention-source.tar.gz
+          retention-days: 1
