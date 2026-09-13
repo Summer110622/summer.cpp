@@ -1,0 +1,56 @@
+name: Repair serial MoE generated newlines # 逐次expertブロックの生成時改行を修復して再検証する。
+on: # 一時修復ワークフローの起動条件を定義する。
+  push: # このファイル追加時だけ起動する。
+    branches: [feat/serial-moe-experts] # 対象を作業ブランチに限定する。
+    paths: ['.github/workflows/serial-moe-fix.yml'] # 自身の追加時だけ実行して再帰を防ぐ。
+permissions: # 必要な権限だけを付与する。
+  contents: write # 修復済みソースを同じブランチへコミットするため書き込みを許可する。
+jobs: # 修復、静的検査、ビルド、コミットを一つのジョブで実行する。
+  fix: # 修復ジョブを定義する。
+    runs-on: ubuntu-24.04 # Linuxランナー上で検証する。
+    timeout-minutes: 20 # 停止時の実行時間を制限する。
+    steps: # 処理順序を定義する。
+      - uses: actions/checkout@v4 # 現在の作業ブランチを取得する。
+        with: # checkout対象を指定する。
+          ref: feat/serial-moe-experts # 修復対象ブランチを直接取得する。
+      - name: Convert generated escape sequences to physical lines # Serial MoEブロック内だけのリテラル改行を実改行へ変換する。
+        run: | # Pythonで開始・終了マーカー間だけを限定修復する。
+          python3 - <<'PY' # ソース変換をPythonで厳密に行う。
+          from pathlib import Path # UTF-8ソースを安全に読み書きする。
+          path = Path('src/llama-graph.cpp') # 共通MoEグラフ実装を対象にする。
+          text = path.read_text(encoding='utf-8') # 現在のブランチ内容を読み込む。
+          start_marker = '    if (serial_moe_experts_enabled() && hparams.n_expert_used(il) > 1) {' # 逐次経路の開始位置を一意に特定する。
+          end_marker = '    } // Serial MoE実験経路を終了する.\\n\\n' # 旧生成文字列の終端候補を定義する。
+          start = text.index(start_marker) # 逐次経路の先頭位置を取得する。
+          next_parallel = text.index('    if (weight_before_ffn) {', start + len(start_marker)) # 元の並列経路の開始位置を終端として使う。
+          segment = text[start:next_parallel] # 逐次経路だけを切り出して他の文字列を変更しない。
+          assert '\\n' in segment # 修復対象のリテラル改行が存在することを確認する。
+          fixed = segment.replace('\\n', '\n') # 逐次経路内のリテラル改行だけを物理改行へ変換する。
+          assert fixed.count('\n') > 60 # 多数のC++行へ展開されたことを確認する。
+          text = text[:start] + fixed + text[next_parallel:] # 修復済みブロックを元の位置へ戻す。
+          path.write_text(text, encoding='utf-8') # 修復済みソースを書き戻す。
+          PY
+      - name: Verify explanatory comments on added serial block # ユーザー指定どおり追加コード各行に説明コメントがあることを確認する。
+        run: | # Serial MoEブロックの非空行を機械的に検査する。
+          python3 - <<'PY' # コメント規則をPythonで検証する。
+          from pathlib import Path # ソースを読み込む。
+          text = Path('src/llama-graph.cpp').read_text(encoding='utf-8') # 修復済みソース全文を取得する。
+          start = text.index('    if (serial_moe_experts_enabled() && hparams.n_expert_used(il) > 1) {') # 追加ブロック先頭を取得する。
+          end = text.index('    if (weight_before_ffn) {', start + 10) # 元の並列経路先頭を追加ブロック終端として取得する。
+          lines = [line for line in text[start:end].splitlines() if line.strip()] # 追加ブロックの非空行だけを列挙する。
+          missing = [line for line in lines if '//' not in line] # 説明コメントを持たない追加行を抽出する。
+          assert not missing, 'Uncommented added lines: ' + repr(missing[:5]) # 一行でも説明コメントがなければ検証を失敗させる。
+          print(f'commented serial lines: {len(lines)}') # 検査した行数をCIログへ出力する。
+          PY
+      - name: Configure CPU library build # 共通推論ライブラリのCPUビルドを生成する。
+        run: cmake -S . -B build-serial -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_CUDA=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_OPENSSL=OFF # フロントエンド依存を除外してMoEコードを検証する。
+      - name: Build llama library # 修復された逐次経路を実際にC++コンパイル・リンクする。
+        run: cmake --build build-serial --parallel 3 --target llama # 共通ライブラリ本体の成功を必須にする。
+      - name: Commit repaired implementation # 全検証が成功した場合だけ修復を保存する。
+        run: | # Git検査とコミットを行う。
+          git diff --check # whitespace破損を拒否する。
+          git config user.name 'github-actions[bot]' # 自動コミットの作者名を設定する。
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com' # 自動コミットの公開メールを設定する。
+          git add src/llama-graph.cpp # 実装修復だけをstageする。
+          git commit -m 'fix: materialize serial MoE expert graph lines' # 修復内容が明確なコミットを作成する。
+          git push origin HEAD:feat/serial-moe-experts # 検証済み修復を作業ブランチへ反映する。
