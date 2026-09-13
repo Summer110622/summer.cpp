@@ -2,7 +2,7 @@ name: Bit attention
 
 on:
   push:
-    branches: [feat/bit-attention-kernel]
+    branches: [master]
     paths:
       - '.github/workflows/bit-attention.yml'
       - 'ggml/**'
@@ -10,7 +10,7 @@ on:
       - 'include/**'
       - 'common/**'
       - 'tests/**'
-      - 'scripts/bit-attention/**'
+      - 'tools/llama-bench/**'
   pull_request:
     paths:
       - '.github/workflows/bit-attention.yml'
@@ -19,22 +19,84 @@ on:
       - 'include/**'
       - 'common/**'
       - 'tests/**'
+      - 'tools/llama-bench/**'
 
 permissions:
   contents: read
 
+concurrency:
+  group: bit-attention-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  source:
+  cpu:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Package exact source for offline validation
-        run: git archive HEAD | gzip > "$RUNNER_TEMP/bit-attention-source.tar.gz"
-      - uses: actions/upload-artifact@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build-bit -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DGGML_NATIVE=OFF -DGGML_CUDA=OFF -DGGML_RPC=ON -DLLAMA_BUILD_TESTS=ON
+          -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=ON
+          -DLLAMA_BUILD_SERVER=ON -DLLAMA_OPENSSL=OFF
+      - name: Build kernels, runtime and frontends
+        run: >-
+          cmake --build build-bit --parallel 3 --target
+          test-bit-attention test-bit-attention-model test-bit-attention-args
+          llama-cli llama-server llama-bench
+      - name: Numerical, model/cache and argument tests (offline)
+        run: ctest --test-dir build-bit -R '^test-bit-attention' --output-on-failure
+      - name: Frontend and benchmark smoke tests
+        shell: bash
+        run: |
+          build-bit/bin/llama-cli --help > cli-help.txt
+          build-bit/bin/llama-server --help > server-help.txt
+          grep -q -- '--bit-attn' cli-help.txt
+          grep -q -- '--bit-attn' server-help.txt
+          build-bit/bin/test-bit-attention-model --write-fixture "$RUNNER_TEMP/bit.gguf"
+          build-bit/bin/llama-bench -m "$RUNNER_TEMP/bit.gguf" -ngl 0 -p 8 -n 4 -r 1 --bit-attn -o json > bit-bench.json
+          build-bit/bin/llama-bench -m "$RUNNER_TEMP/bit.gguf" -ngl 0 -p 8 -n 4 -r 1 -o json > normal-bench.json
+          python3 - <<'PY'
+          import json
+          rows = json.load(open('bit-bench.json'))
+          assert rows and all(row['bit_attn'] is True for row in rows)
+          normal = json.load(open('normal-bench.json'))
+          assert normal and all(row['bit_attn'] is False for row in normal)
+          PY
+
+  cuda-compile:
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:12.8.1-devel-ubuntu24.04
+    timeout-minutes: 20
+    steps:
+      - name: Install build tools
+        run: apt-get update && apt-get install -y --no-install-recommends git cmake ninja-build g++ python3
+      - uses: actions/checkout@v4
         with:
-          name: bit-attention-source
-          path: ${{ runner.temp }}/bit-attention-source.tar.gz
-          retention-days: 1
+          persist-credentials: false
+      - name: Configure CUDA (compilation only, no GPU required)
+        run: >-
+          cmake -S . -B build-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=80
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DLLAMA_BUILD_TESTS=OFF
+          -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF
+          -DLLAMA_BUILD_SERVER=OFF -DLLAMA_OPENSSL=OFF
+      - name: Compile native kernels and central CUDA dispatch
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, shlex, subprocess
+          commands = json.load(open('build-cuda/compile_commands.json'))
+          selected = [x for x in commands if pathlib.Path(x['file']).name in ('bit-attn.cu', 'ggml-cuda.cu')]
+          assert len(selected) == 2, 'Both CUDA translation units must be compiled'
+          for item in selected:
+              command = shlex.split(item['command'])
+              if '-o' in command:
+                  output = pathlib.Path(item['directory']) / command[command.index('-o') + 1]
+                  output.parent.mkdir(parents=True, exist_ok=True)
+              print('Compiling', item['file'], flush=True)
+              subprocess.run(command, cwd=item['directory'], check=True)
+          print('CUDA compilation passed. GPU numerical execution and performance are NOT tested by this job.')
+          PY
