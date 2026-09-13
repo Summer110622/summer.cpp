@@ -13,6 +13,7 @@
 #include "binary-ops.h"
 #include "vec.h"
 #include "ops.h"
+#include "bit-attention.h" // 専用AttentionのCPU実行とスクラッチ容量を参照する。
 #include "ggml.h"
 #include "common.h"
 
@@ -2022,6 +2023,9 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_fill(params, tensor);
             } break;
+        case GGML_OP_BIT_ATTN_EXT: // 符号化Attentionを通常のFlashAttentionと区別する。
+            ggml_compute_forward_bit_attn_ext(params, tensor); // CPUワーカーでパックと融合加重和を計算する。
+            break; // 符号化Attentionのディスパッチを終了する。
         case GGML_OP_FLASH_ATTN_EXT:
             {
                 ggml_compute_forward_flash_attn_ext(params, tensor);
@@ -2421,6 +2425,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_TIMESTEP_EMBEDDING:
         case GGML_OP_ARGSORT:
         case GGML_OP_TOP_K:
+        case GGML_OP_BIT_ATTN_EXT: // パック領域の生成とクエリ行を全CPUワーカーへ分割する。
         case GGML_OP_FLASH_ATTN_EXT:
         case GGML_OP_FLASH_ATTN_BACK:
         case GGML_OP_SSM_CONV:
@@ -2984,6 +2989,9 @@ struct ggml_cplan ggml_graph_plan(
                     {
                         cur += sizeof(int32_t)*node->src[0]->ne[0]*n_tasks;
                     } break;
+                case GGML_OP_BIT_ATTN_EXT: // Q/Kを一度だけパックする共有スクラッチを確保する。
+                    cur += ggml_bit_attn_ext_work_size(node); // 二乗スコア行列ではなく線形サイズのワード領域を予約する。
+                    break; // 専用Attentionの容量計算を終了する。
                 case GGML_OP_FLASH_ATTN_EXT:
                     {
                         const int64_t neq2 = node->src[0]->ne[2]; // number of query heads

@@ -2612,31 +2612,38 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
     ggml_tensor * cur;
 
-    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
+    const bool use_flash_attn = cparams.bit_attn || (cparams.flash_attn && kq_b == nullptr); // 符号化Attentionも融合出力レイアウトの共通経路へ接続する。
     if (use_flash_attn) {
-        GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
+        GGML_ASSERT(cparams.bit_attn || kq_b == nullptr); // 通常FlashAttentionだけに残るKQバイアス制限を維持する。
 
         if (v_trans) {
             v = ggml_transpose(ctx0, v);
         }
 
         // this can happen when KV cache is not used (e.g. an embedding model with non-causal attn)
-        if (k->type == GGML_TYPE_F32) {
+        if (!cparams.bit_attn && k->type == GGML_TYPE_F32) { // 符号化では微小な負値の符号がcastで失われることを防ぐ。
             k = ggml_cast(ctx0, k, GGML_TYPE_F16);
         }
 
-        if (v->type == GGML_TYPE_F32) {
+        if (!cparams.bit_attn && v->type == GGML_TYPE_F32) { // BitAttentionではVの元の浮動小数点精度を維持する。
             v = ggml_cast(ctx0, v, GGML_TYPE_F16);
         }
 
-        cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
-                                  hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
-        res->add_fused_node({LLM_FUSED_OP_FLASH_ATTN, cur, il});
-
-        ggml_flash_attn_ext_add_sinks(cur, sinks);
-        GGML_ASSERT(n_kv_max >= 0 && n_kv_max <= INT32_MAX);
-        ggml_flash_attn_ext_set_n_kv_max(cur, static_cast<int32_t>(n_kv_max));
-        ggml_prec_set_acc(cur, GGML_PREC_F32);
+        if (cparams.bit_attn) { // 共通MHA経路の各層で明示指定された符号化Attentionを選択する。
+            ggml_tensor * bias = kq_b ? ggml_scale(ctx0, kq_b, kq_scale) : nullptr; // 通常softmax前と同じスケールで追加logitバイアスを渡す。
+            cur = ggml_bit_attn_ext(ctx0, q, k, v, kq_mask, sinks, bias, kq_scale, hparams.f_max_alibi_bias, // RoPE後のQ/Kと既存の因果・系列境界マスクをそのまま使用する。
+                                   hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f); // モデル指定のソフトキャップを維持する。
+            cb(cur, "bit_attn", il); // グラフ診断で置換されたAttention層を識別する。
+            if (!cparams.offload_kqv) { ggml_backend_sched_set_tensor_backend(sched, cur, backend_cpu); } // --no-kv-offload指定時はこの演算をCPUへ固定する。
+        } else { // opt-inされていない場合は従来のFlashAttentionを完全に維持する。
+            cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias, // 従来の浮動小数点QKカーネルを構築する。
+                                      hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f); // 従来のソフトキャップ指定を渡す。
+            res->add_fused_node({LLM_FUSED_OP_FLASH_ATTN, cur, il}); // FlashAttentionの自動対応検出には従来opだけを登録する。
+            ggml_flash_attn_ext_add_sinks(cur, sinks); // 従来opのsink設定を保持する。
+            GGML_ASSERT(n_kv_max >= 0 && n_kv_max <= INT32_MAX); // sparse KV上限の既存検証を維持する。
+            ggml_flash_attn_ext_set_n_kv_max(cur, static_cast<int32_t>(n_kv_max)); // 従来のsparse最適化ヒントを保持する。
+            ggml_prec_set_acc(cur, GGML_PREC_F32); // 従来opのFP32累積指定を保持する。
+        } // 符号化Attentionと従来Attentionの選択を終了する。
 
         if (v_mla) {
 #if 0

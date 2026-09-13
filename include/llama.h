@@ -416,6 +416,7 @@ extern "C" {
         // a source/target/parent context
         // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
         struct llama_context * ctx_other;
+        bool bit_attn; // [EXPERIMENTAL] 既定はfalseで、通常MHA層のQ/K類似度を1bitへ置換する。
     };
 
     struct llama_model_tensor_override {

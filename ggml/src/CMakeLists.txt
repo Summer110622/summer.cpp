@@ -197,6 +197,7 @@ add_library(ggml-base
             ../include/ggml-opt.h
             ../include/gguf.h
             ggml.c
+            ggml-bit-attention.c # すべてのバックエンドで共通のBitAttentionノード構築APIを組み込む。
             ggml.cpp
             ggml-alloc.c
             ggml-backend.cpp

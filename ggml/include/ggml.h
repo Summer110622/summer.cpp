@@ -600,6 +600,7 @@ extern "C" {
         GGML_OP_OPT_STEP_SGD,
 
         GGML_OP_GLU,
+        GGML_OP_BIT_ATTN_EXT, // 既存op番号を維持して符号化Q/KのAttentionを末尾へ追加する。
 
         GGML_OP_COUNT,
     };
@@ -2484,6 +2485,18 @@ extern "C" {
     //   n_head % ne32      == 0
     //   ne3    % ne33      == 0
     //
+    GGML_API struct ggml_tensor * ggml_bit_attn_ext( // 符号化Q/Kと高精度Vによるforward専用Attentionを構築する。
+        struct ggml_context * ctx, // 出力ノードの所有コンテキストを指定する。
+        struct ggml_tensor * q, // Qを[DK,NQ,HQ,BQ]形式で指定する。
+        struct ggml_tensor * k, // Kを[DK,NK,HK,BK]形式で指定する。
+        struct ggml_tensor * v, // Vを[DV,NK,HV,BV]形式で指定する。
+        struct ggml_tensor * mask, // -INFINITYを無効位置とする加算マスクを指定する。
+        struct ggml_tensor * sinks, // ヘッドごとの任意のFP32 sink logitを指定する。
+        struct ggml_tensor * bias, // スケール適用済みの任意の加算logitバイアスを指定する。
+        float scale, // 符号内積D-2*popcount(Q^K)に掛ける係数を指定する。
+        float max_bias, // ALiBiの最大バイアス係数を指定する。
+        float logit_softcap); // ゼロで無効になるtanh logit制限を指定する。
+
     GGML_API struct ggml_tensor * ggml_flash_attn_ext(
             struct ggml_context * ctx,
             struct ggml_tensor  * q,

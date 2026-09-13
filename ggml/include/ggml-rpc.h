@@ -8,10 +8,10 @@ extern "C" {
 
 #define RPC_PROTO_MAJOR_VERSION    6
 #define RPC_PROTO_MINOR_VERSION    0
-#define RPC_PROTO_PATCH_VERSION    0
+#define RPC_PROTO_PATCH_VERSION    1 // 新しいop番号を扱うRPC実装を旧版と区別する。
 
 #ifdef  __cplusplus
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT has changed - update RPC_PROTO_PATCH_VERSION");
+static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT has changed - update RPC_PROTO_PATCH_VERSION"); // RPC側の演算数を専用Attention追加後の値に合わせる。
 #endif
 
 #define GGML_RPC_MAX_SERVERS       16

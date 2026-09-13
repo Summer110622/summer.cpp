@@ -1748,6 +1748,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.n_chunks = value;
         }
     ).set_examples({LLAMA_EXAMPLE_IMATRIX, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_RETRIEVAL}));
+    add_opt(common_arg( // 全共通CLIで符号化Attentionの切り替えを公開する。
+        {"--bit-attn"}, // 明示的に有効化するオプションを登録する。
+        {"--no-bit-attn"}, // 明示的に無効化する対のオプションを登録する。
+        "experimental 1-bit Q/K attention; changes outputs; f32/f16/bf16 KV cache only (default: disabled)", // 精度が保持される単なる高速化ではないことを表示する。
+        [](common_params & params, bool value) { params.bit_attn = value; } // CLI値を共通コンテキスト設定へ保存する。
+    ).set_env("LLAMA_ARG_BIT_ATTN")); // server運用でも環境変数から同じ設定を使用できるようにする。
     add_opt(common_arg({ "-fa", "--flash-attn" }, "[on|off|auto]",
                        string_format("set Flash Attention use ('on', 'off', or 'auto', default: '%s')",
                                      llama_flash_attn_type_name(params.flash_attn_type)),

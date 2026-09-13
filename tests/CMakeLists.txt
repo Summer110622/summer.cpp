@@ -381,3 +381,16 @@ if (TARGET gguf-model-data)
     target_link_libraries(test-export-graph-ops PRIVATE gguf-model-data)
     target_compile_definitions(test-export-graph-ops PRIVATE LLAMA_HF_FETCH)
 endif()
+
+add_executable(test-bit-attention test-bit-attention.cpp) # モデル不要の符号化Attention数値テストを追加する。
+target_link_libraries(test-bit-attention PRIVATE ggml) # CPUと利用可能なGPUの共通バックエンドAPIへリンクする。
+add_test(NAME test-bit-attention COMMAND test-bit-attention) # CTestへ参照実装との比較を登録する。
+if (NOT WIN32 OR NOT BUILD_SHARED_LIBS) # 内部モデル生成APIを使用できる構成だけで統合テストを追加する。
+    add_executable(test-bit-attention-model test-bit-attention-model.cpp) # 公開llama APIからの実行経路を検証する実行ファイルを作る。
+    target_link_libraries(test-bit-attention-model PRIVATE llama) # 実際の推論ライブラリへリンクする。
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bit-attention-model") # 再現可能な小型モデルの出力先を作成する。
+    add_test(NAME test-bit-attention-generate COMMAND test-llama-archs -a llama -s 1234 -o "${CMAKE_CURRENT_BINARY_DIR}/bit-attention-model") # 外部モデルをダウンロードせず固定seedのフィクスチャを生成する。
+    set_tests_properties(test-bit-attention-generate PROPERTIES FIXTURES_SETUP bit-attention-model) # 生成したモデルを統合テストの前提条件にする。
+    add_test(NAME test-bit-attention-model COMMAND test-bit-attention-model "${CMAKE_CURRENT_BINARY_DIR}/bit-attention-model/llama-dense.gguf") # 本物のグラフ構築・prefill・decode経路を検証する。
+    set_tests_properties(test-bit-attention-model PROPERTIES FIXTURES_REQUIRED bit-attention-model) # 小型モデル生成後にだけ推論テストを実行する。
+endif() # 内部APIを使用可能な構成向けの統合テストを終了する。

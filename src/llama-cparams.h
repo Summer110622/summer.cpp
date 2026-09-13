@@ -38,6 +38,7 @@ struct llama_cparams {
     bool causal_attn;
     bool offload_kqv;
     bool flash_attn;
+    bool bit_attn; // コンテキスト単位で符号化Q/KのAttention使用を保持する。
     bool auto_fa;
     bool fused_gdn_ar;       // use fused gated delta net (autoregressive)
     bool fused_gdn_ch;       // use fused gated delta net (chunked)

@@ -25,6 +25,7 @@
 #include "ggml-cuda/diagmask.cuh"
 #include "ggml-cuda/diag.cuh"
 #include "ggml-cuda/fattn.cuh"
+#include "ggml-cuda/bit-attention.cuh" // 専用の符号化Q/KカーネルをCUDA実行系へ公開する。
 #include "ggml-cuda/fwht.cuh"
 #include "ggml-cuda/getrows.cuh"
 #include "ggml-cuda/im2col.cuh"
@@ -2356,6 +2357,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_ARGSORT:
             ggml_cuda_op_argsort(ctx, dst);
             break;
+        case GGML_OP_BIT_ATTN_EXT: // 通常のFlashAttentionと独立して符号化Attentionを実行する。
+            ggml_cuda_bit_attn_ext(ctx, dst); // XOR・popcount・online softmax・V加重和を起動する。
+            break; // 専用カーネルのディスパッチを終了する。
         case GGML_OP_FLASH_ATTN_EXT:
             ggml_cuda_flash_attn_ext(ctx, dst);
             break;
@@ -5492,6 +5496,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
                 op->src[2]->type == GGML_TYPE_F32 && op->src[3]->type == GGML_TYPE_F32 &&
                 op->type == GGML_TYPE_F32;
+        case GGML_OP_BIT_ATTN_EXT: // 未対応の型や形状をCPUへ安全にフォールバックさせる。
+            return ggml_cuda_bit_attn_ext_supported(op); // NVIDIA専用カーネルの対応条件を使用する。
         case GGML_OP_FLASH_ATTN_EXT:
             return ggml_cuda_flash_attn_ext_supported(dev_ctx->device, op);
         case GGML_OP_CROSS_ENTROPY_LOSS:

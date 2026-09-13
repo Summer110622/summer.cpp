@@ -227,6 +227,7 @@ llama_context::llama_context(
     }
 
     cparams.flash_attn = params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    cparams.bit_attn = params.bit_attn; // APIまたはCLIで明示的に有効化された場合だけ符号化Attentionを使う。
     cparams.auto_fa    = params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO;
 
     cparams.fused_gdn_ar = true;
@@ -3654,6 +3655,7 @@ llama_context_params llama_context_default_params() {
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
         /*.ctx_other                   =*/ nullptr,
+        /*.bit_attn                    =*/ false, // 既存モデルの出力を変えないよう実験機能を既定で無効にする。
     };
 
     return result;
@@ -3666,6 +3668,19 @@ llama_context * llama_init_from_model(
         LLAMA_LOG_ERROR("%s: model cannot be NULL\n", __func__);
         return nullptr;
     }
+
+    if (params.bit_attn) { // 出力の意味を変更する実験機能の構成を初期化前に検証する。
+        const auto float_cache = [](ggml_type type) { return type == GGML_TYPE_F32 || type == GGML_TYPE_F16 || type == GGML_TYPE_BF16; }; // 符号パッキングとV読み取りが対応するキャッシュ型を列挙する。
+        if (!float_cache(params.type_k) || !float_cache(params.type_v)) { // 未対応のブロック量子化KVキャッシュを検出する。
+            LLAMA_LOG_ERROR("%s: bit attention requires f32/f16/bf16 K and V caches\n", __func__); // 暗黙の精度変更をせず不適合の理由を表示する。
+            return nullptr; // 未対応型をカーネルに渡さず初期化を失敗させる。
+        } // KVキャッシュ型の検証を終了する。
+        if (model->split_mode() == LLAMA_SPLIT_MODE_TENSOR || model->arch == LLM_ARCH_GROK) { // 未実装のテンソル分割と特殊logit変換を検出する。
+            LLAMA_LOG_ERROR("%s: bit attention does not support tensor split or Grok logit transforms\n", __func__); // 未対応構成を明示して黙った意味変更を避ける。
+            return nullptr; // 不正なグラフを構築する前に初期化を中止する。
+        } // 特殊構成の検証を終了する。
+        LLAMA_LOG_WARN("%s: EXPERIMENTAL bit attention changes model outputs; accuracy and speed are not guaranteed; KV cache remains floating point\n", __func__); // 品質・速度・永続キャッシュ容量について誤解を防ぐ。
+    } // 明示有効化時の検証を終了する。
 
     if (params.n_batch == 0 && params.n_ubatch == 0) {
         LLAMA_LOG_ERROR("%s: n_batch and n_ubatch cannot both be zero\n", __func__);
