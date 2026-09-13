@@ -383,16 +383,16 @@ if (TARGET gguf-model-data)
 endif()
 
 # Independent double-precision oracle; no model files or network required.
-add_executable(test-bit-attention test-bit-attention.cpp)
-target_link_libraries(test-bit-attention PRIVATE ggml)
-llama_test(test-bit-attention LABEL bit-attention)
-set_tests_properties(test-bit-attention PROPERTIES SKIP_RETURN_CODE 77)
+add_executable(test-bit-attention test-bit-attention.cpp) # BitAttentionの回帰テスト実行ファイルを定義する。
+target_link_libraries(test-bit-attention PRIVATE ggml) # テストが利用するGGMLまたはLlama実装をリンクする。
+llama_test(test-bit-attention LABEL bit-attention) # 通常のCTest実行へ二値Attentionテストを登録する。
+set_tests_properties(test-bit-attention PROPERTIES SKIP_RETURN_CODE 77) # 明示指定したバックエンドがない場合を成功ではなくスキップとして記録する。
 
-add_executable(test-bit-attention-model test-bit-attention-model.cpp)
-target_compile_features(test-bit-attention-model PRIVATE cxx_std_17)
-target_link_libraries(test-bit-attention-model PRIVATE llama)
-llama_test(test-bit-attention-model LABEL bit-attention)
+add_executable(test-bit-attention-model test-bit-attention-model.cpp) # BitAttentionの回帰テスト実行ファイルを定義する。
+target_compile_features(test-bit-attention-model PRIVATE cxx_std_17) # 一時GGUFのファイル操作に必要なC++17を指定する。
+target_link_libraries(test-bit-attention-model PRIVATE llama) # テストが利用するGGMLまたはLlama実装をリンクする。
+llama_test(test-bit-attention-model LABEL bit-attention) # 通常のCTest実行へ二値Attentionテストを登録する。
 
-add_executable(test-bit-attention-args test-bit-attention-args.cpp)
-target_link_libraries(test-bit-attention-args PRIVATE llama-common)
-llama_test(test-bit-attention-args LABEL bit-attention)
+add_executable(test-bit-attention-args test-bit-attention-args.cpp) # BitAttentionの回帰テスト実行ファイルを定義する。
+target_link_libraries(test-bit-attention-args PRIVATE llama-common) # テストが利用するGGMLまたはLlama実装をリンクする。
+llama_test(test-bit-attention-args LABEL bit-attention) # 通常のCTest実行へ二値Attentionテストを登録する。

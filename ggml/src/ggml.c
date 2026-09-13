@@ -1100,12 +1100,12 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
 
     "GLU",
 
-    "BIT_PACK",
-    "BIT_MUL_MAT",
-    "BIT_ATTN_EXT",
+    "BIT_PACK", // 演算グラフの診断に使う二値演算の名称を登録する。
+    "BIT_MUL_MAT", // 演算グラフの診断に使う二値演算の名称を登録する。
+    "BIT_ATTN_EXT", // 演算グラフの診断に使う二値演算の名称を登録する。
 };
 
-static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
+static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104"); // 三つの新演算を含む演算数と登録表・RPCの整合性をコンパイル時に検査する。
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1219,12 +1219,12 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
 
     "glu(x)",
 
-    "bit_pack(x)",
-    "bit_mul_mat(x,y)",
-    "bit_attn_ext(x)",
+    "bit_pack(x)", // 演算グラフの診断に使う二値演算の名称を登録する。
+    "bit_mul_mat(x,y)", // 演算グラフの診断に使う二値演算の名称を登録する。
+    "bit_attn_ext(x)", // 演算グラフの診断に使う二値演算の名称を登録する。
 };
 
-static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
+static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104"); // 三つの新演算を含む演算数と登録表・RPCの整合性をコンパイル時に検査する。
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -5502,81 +5502,81 @@ struct ggml_tensor * ggml_arange(
 
 // Experimental sign-only Q/K attention. Parameters are serialized as ordinary
 // ggml op_params; there are no function pointers or process-global mode switches.
-static bool ggml_bit_float_type(enum ggml_type type) {
-    return type == GGML_TYPE_F32 || type == GGML_TYPE_F16 || type == GGML_TYPE_BF16;
-}
+static bool ggml_bit_float_type(enum ggml_type type) { // GGMLの二値Attentionで直接扱える型を判定する。
+    return type == GGML_TYPE_F32 || type == GGML_TYPE_F16 || type == GGML_TYPE_BF16; // 直接符号判定できる三つの浮動小数点型だけを許可する。
+} // この処理または定義のブロックを閉じる。
 
-struct ggml_tensor * ggml_bit_pack(struct ggml_context * ctx, struct ggml_tensor * x) {
-    if (ggml_is_quantized(x->type)) {
-        x = ggml_cast(ctx, x, GGML_TYPE_F32);
-    }
-    GGML_ASSERT(ggml_bit_float_type(x->type));
-    GGML_ASSERT(!ggml_is_empty(x));
-    int64_t ne[4] = { (x->ne[0] + 31)/32, x->ne[1], x->ne[2], x->ne[3] };
-    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_I32, 4, ne);
-    result->op = GGML_OP_BIT_PACK;
-    result->src[0] = x;
-    return result;
-}
+struct ggml_tensor * ggml_bit_pack(struct ggml_context * ctx, struct ggml_tensor * x) { // GGMLグラフへ符号パック演算を追加する。
+    if (ggml_is_quantized(x->type)) { // 量子化入力には明示的な復号演算を挿入する。
+        x = ggml_cast(ctx, x, GGML_TYPE_F32); // 量子化入力を明示的にF32へ復号してから符号判定する。
+    } // この処理または定義のブロックを閉じる。
+    GGML_ASSERT(ggml_bit_float_type(x->type)); // 符号パック前の型が対応する浮動小数点型か確認する。
+    GGML_ASSERT(!ggml_is_empty(x)); // 空テンソルのパックを拒否する。
+    int64_t ne[4] = { (x->ne[0] + 31)/32, x->ne[1], x->ne[2], x->ne[3] }; // 特徴軸だけを32ビット単位の語数へ圧縮する。
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_I32, 4, ne); // 符号32個を実際の4バイト語に格納する出力を作る。
+    result->op = GGML_OP_BIT_PACK; // 符号パック演算としてバックエンドへ通知する。
+    result->src[0] = x; // 元の浮動小数点入力をパック演算の依存先にする。
+    return result; // 構築した演算テンソルを返す。
+} // この処理または定義のブロックを閉じる。
 
-static void ggml_bit_check_qk(const struct ggml_tensor * q, const struct ggml_tensor * k, int32_t d) {
-    GGML_ASSERT(d > 0);
-    GGML_ASSERT(q->type == GGML_TYPE_I32 && k->type == GGML_TYPE_I32);
-    GGML_ASSERT(!ggml_is_empty(q) && !ggml_is_empty(k));
-    GGML_ASSERT(q->ne[0] == ((int64_t) d + 31)/32 && k->ne[0] == q->ne[0]);
-    GGML_ASSERT(q->ne[2] % k->ne[2] == 0 && q->ne[3] % k->ne[3] == 0);
-}
+static void ggml_bit_check_qk(const struct ggml_tensor * q, const struct ggml_tensor * k, int32_t d) { // 二値Q/Kの型・語数・共有率を検査する。
+    GGML_ASSERT(d > 0); // 特徴次元が正であることを要求する。
+    GGML_ASSERT(q->type == GGML_TYPE_I32 && k->type == GGML_TYPE_I32); // QとKに32ビット語のストレージを要求する。
+    GGML_ASSERT(!ggml_is_empty(q) && !ggml_is_empty(k)); // 空のQまたはKによる無効な形状演算を拒否する。
+    GGML_ASSERT(q->ne[0] == ((int64_t) d + 31)/32 && k->ne[0] == q->ne[0]); // パック語数が実特徴次元から求めた語数に等しいか検査する。
+    GGML_ASSERT(q->ne[2] % k->ne[2] == 0 && q->ne[3] % k->ne[3] == 0); // ヘッドとバッチの共有率が整数になることを要求する。
+} // この処理または定義のブロックを閉じる。
 
-struct ggml_tensor * ggml_bit_mul_mat(
-        struct ggml_context * ctx, struct ggml_tensor * a, struct ggml_tensor * b, int32_t head_dim) {
-    ggml_bit_check_qk(b, a, head_dim);
-    int64_t ne[4] = { a->ne[1], b->ne[1], b->ne[2], b->ne[3] };
-    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
-    result->op = GGML_OP_BIT_MUL_MAT;
-    result->src[0] = a;
-    result->src[1] = b;
-    ggml_set_op_params_i32(result, 0, head_dim);
-    return result;
-}
+struct ggml_tensor * ggml_bit_mul_mat( // GGMLグラフへ二値内積行列の演算を追加する。
+        struct ggml_context * ctx, struct ggml_tensor * a, struct ggml_tensor * b, int32_t head_dim) { // グラフ領域・パック済みK/Q・実特徴次元を受け取る。
+    ggml_bit_check_qk(b, a, head_dim); // MulMatのa=K、b=Qの順序でパック形状を検査する。
+    int64_t ne[4] = { a->ne[1], b->ne[1], b->ne[2], b->ne[3] }; // 明示的スコア行列を[Nk,Nq,Hq,Bq]として確保する。
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne); // 計算結果を保持するF32出力テンソルを作る。
+    result->op = GGML_OP_BIT_MUL_MAT; // XOR/popcountによるスコア行列演算を指定する。
+    result->src[0] = a; // 第1入力をパック済みKeyとして登録する。
+    result->src[1] = b; // 第2入力をパック済みQueryとして登録する。
+    ggml_set_op_params_i32(result, 0, head_dim); // スコア演算へパディングを除いた特徴次元を渡す。
+    return result; // 構築した演算テンソルを返す。
+} // この処理または定義のブロックを閉じる。
 
-struct ggml_tensor * ggml_bit_attn_ext(
-        struct ggml_context * ctx,
-        struct ggml_tensor * q, struct ggml_tensor * k, struct ggml_tensor * v,
-        struct ggml_tensor * mask, struct ggml_tensor * sinks,
-        int32_t head_dim, float scale, float max_bias, float logit_softcap) {
-    ggml_bit_check_qk(q, k, head_dim);
-    GGML_ASSERT(isfinite(scale) && isfinite(max_bias) && isfinite(logit_softcap));
-    GGML_ASSERT(max_bias >= 0.0f && logit_softcap >= 0.0f);
-    if (ggml_is_quantized(v->type)) {
-        v = ggml_cast(ctx, v, GGML_TYPE_F32);
-    }
-    GGML_ASSERT(ggml_bit_float_type(v->type) && !ggml_is_empty(v));
-    GGML_ASSERT(v->ne[1] == k->ne[1]);
-    GGML_ASSERT(q->ne[2] % v->ne[2] == 0 && q->ne[3] % v->ne[3] == 0);
-    if (mask) {
-        GGML_ASSERT(ggml_bit_float_type(mask->type) && !ggml_is_empty(mask));
-        GGML_ASSERT(mask->ne[0] >= k->ne[1] && mask->ne[1] >= q->ne[1]);
-        GGML_ASSERT(q->ne[2] % mask->ne[2] == 0 && q->ne[3] % mask->ne[3] == 0);
-    }
-    GGML_ASSERT(max_bias == 0.0f || mask);
-    if (sinks) {
-        GGML_ASSERT(sinks->type == GGML_TYPE_F32 && ggml_is_vector(sinks));
-        GGML_ASSERT(sinks->ne[0] == q->ne[2]);
-    }
-    int64_t ne[4] = { v->ne[0], q->ne[2], q->ne[1], q->ne[3] };
-    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
-    result->op = GGML_OP_BIT_ATTN_EXT;
-    result->src[0] = q;
-    result->src[1] = k;
-    result->src[2] = v;
-    result->src[3] = mask;
-    result->src[4] = sinks;
-    ggml_set_op_params_f32(result, 0, scale);
-    ggml_set_op_params_f32(result, 1, max_bias);
-    ggml_set_op_params_f32(result, 2, logit_softcap);
-    ggml_set_op_params_i32(result, 3, head_dim);
-    return result;
-}
+struct ggml_tensor * ggml_bit_attn_ext( // GGMLグラフへonline softmax付き二値Attentionを追加する。
+        struct ggml_context * ctx, // 演算テンソルを割り当てるGGMLコンテキストを受け取る。
+        struct ggml_tensor * q, struct ggml_tensor * k, struct ggml_tensor * v, // パック済みQ/Kと情報を保持するValueを受け取る。
+        struct ggml_tensor * mask, struct ggml_tensor * sinks, // 省略可能な加算マスクと分母用sinkを受け取る。
+        int32_t head_dim, float scale, float max_bias, float logit_softcap) { // 実特徴次元と既存Attentionのロジット変換係数を受け取る。
+    ggml_bit_check_qk(q, k, head_dim); // 融合演算のQueryとKeyのビット数と共有関係を検査する。
+    GGML_ASSERT(isfinite(scale) && isfinite(max_bias) && isfinite(logit_softcap)); // 演算係数のNaNと無限大を拒否する。
+    GGML_ASSERT(max_bias >= 0.0f && logit_softcap >= 0.0f); // ALiBi幅とソフトキャップの負値を拒否する。
+    if (ggml_is_quantized(v->type)) { // 量子化Vには浮動小数点への復号を挿入する。
+        v = ggml_cast(ctx, v, GGML_TYPE_F32); // 量子化Vを明示的に復号して浮動小数点で累積する。
+    } // この処理または定義のブロックを閉じる。
+    GGML_ASSERT(ggml_bit_float_type(v->type) && !ggml_is_empty(v)); // Vが非空の対応浮動小数点型であることを要求する。
+    GGML_ASSERT(v->ne[1] == k->ne[1]); // Keyごとに対応するValueが一つあることを要求する。
+    GGML_ASSERT(q->ne[2] % v->ne[2] == 0 && q->ne[3] % v->ne[3] == 0); // Vのヘッド数とバッチ数がQueryへ整数倍で共有できるか確認する。
+    if (mask) { // マスクが指定された場合だけ型と共有形状を検査する。
+        GGML_ASSERT(ggml_bit_float_type(mask->type) && !ggml_is_empty(mask)); // 加算マスクに非空の対応浮動小数点型を要求する。
+        GGML_ASSERT(mask->ne[0] >= k->ne[1] && mask->ne[1] >= q->ne[1]); // 全Query-Key対を覆うマスクの広さを要求する。
+        GGML_ASSERT(q->ne[2] % mask->ne[2] == 0 && q->ne[3] % mask->ne[3] == 0); // マスクのヘッドとバッチの繰り返しが成立することを確認する。
+    } // この処理または定義のブロックを閉じる。
+    GGML_ASSERT(max_bias == 0.0f || mask); // ALiBiを指定した場合は位置バイアスを含むマスクを要求する。
+    if (sinks) { // sinkが指定された場合だけ型とヘッド数を検査する。
+        GGML_ASSERT(sinks->type == GGML_TYPE_F32 && ggml_is_vector(sinks)); // sinkロジットをF32ベクトルに制限する。
+        GGML_ASSERT(sinks->ne[0] == q->ne[2]); // 各Queryヘッドに一つのsinkロジットを要求する。
+    } // この処理または定義のブロックを閉じる。
+    int64_t ne[4] = { v->ne[0], q->ne[2], q->ne[1], q->ne[3] }; // 融合Attentionの出力を[Dv,Hq,Nq,Bq]の配置にする。
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne); // 計算結果を保持するF32出力テンソルを作る。
+    result->op = GGML_OP_BIT_ATTN_EXT; // online softmaxを含む融合Attention演算を指定する。
+    result->src[0] = q; // 融合演算のパック済みQueryを登録する。
+    result->src[1] = k; // 融合演算のパック済みKeyを登録する。
+    result->src[2] = v; // 情報を保持する浮動小数点Valueを登録する。
+    result->src[3] = mask; // 位置・因果・パディング制約を表す加算マスクを登録する。
+    result->src[4] = sinks; // softmax分母だけへ寄与する省略可能なsinkを登録する。
+    ggml_set_op_params_f32(result, 0, scale); // ロジットに掛けるスケールをシリアライズする。
+    ggml_set_op_params_f32(result, 1, max_bias); // ALiBiのヘッド傾斜を決める値をシリアライズする。
+    ggml_set_op_params_f32(result, 2, logit_softcap); // 任意のtanhソフトキャップ幅をシリアライズする。
+    ggml_set_op_params_i32(result, 3, head_dim); // 融合演算の第4パラメータへ実特徴次元を格納する。
+    return result; // 構築した演算テンソルを返す。
+} // この処理または定義のブロックを閉じる。
 
 // ggml_flash_attn_ext
 

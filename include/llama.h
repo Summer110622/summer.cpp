@@ -418,7 +418,7 @@ extern "C" {
         struct llama_context * ctx_other;
 
         // EXPERIMENTAL: sign-only Q/K attention. Changes model numerics; inference only.
-        bool bit_attn;
+        bool bit_attn; // 実験的な二値Q/K Attentionの有効・無効をコンテキストごとに保持する。
     };
 
     struct llama_model_tensor_override {

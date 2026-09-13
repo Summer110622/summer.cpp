@@ -9,11 +9,11 @@ compression. Evaluate perplexity and task quality before using a checkpoint.
 ## Enable
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DLLAMA_BUILD_TESTS=ON
-cmake --build build --parallel --target llama-cli llama-server llama-bench test-bit-attention test-bit-attention-model test-bit-attention-args
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DLLAMA_BUILD_TESTS=ON # CUDAとテストを含むビルド設定を生成する。
+cmake --build build --parallel --target llama-cli llama-server llama-bench test-bit-attention test-bit-attention-model test-bit-attention-args # カーネルを使用するフロントエンドと三つの回帰テストをビルドする。
 
-build/bin/llama-cli -m model.gguf --bit-attn -p "Hello"
-build/bin/llama-server -m model.gguf --bit-attn
+build/bin/llama-cli -m model.gguf --bit-attn -p "Hello" # モデルを指定してCLIの二値Attentionを有効にする。
+build/bin/llama-server -m model.gguf --bit-attn # 既定のローカルサーバーを二値Attentionで起動する。
 ```
 
 Omit `-DGGML_CUDA=ON` for CPU. The regular command-line tools also accept
@@ -24,9 +24,9 @@ BitAttention uses its own fused operator when enabled, even with `-fa off`.
 The C API defaults to disabled:
 
 ```c
-struct llama_context_params params = llama_context_default_params();
-params.bit_attn = true;
-struct llama_context * ctx = llama_init_from_model(model, params);
+struct llama_context_params params = llama_context_default_params(); // 公開APIの既定設定を取得する。
+params.bit_attn = true; // このコンテキストだけで二値Attentionを有効にする。
+struct llama_context * ctx = llama_init_from_model(model, params); // 設定を渡して推論コンテキストを生成する。
 ```
 
 Rebuild the library and clients together: `llama_context_params` has an appended
@@ -41,10 +41,10 @@ little-bit order (feature 0 is the least-significant bit). Q and K are packed
 K is packed from the existing cache representation.
 
 ```text
-binary_dot(q, k) = D - 2 * popcount((q_bits XOR k_bits) AND valid_bits)
-score            = scale * binary_dot
+binary_dot(q, k) = D - 2 * popcount((q_bits XOR k_bits) AND valid_bits) # 有効な特徴だけをXOR/popcountで二値内積へ変換する。
+score            = scale * binary_dot # 二値内積にAttentionのスケールを掛ける。
 score            = cap * tanh(score / cap)             # only when cap > 0
-score            = score + alibi_slope * additive_mask
+score            = score + alibi_slope * additive_mask # 位置や因果制約を表す加算マスクを反映する。
 output           = softmax(score, optional_sink) @ V   # sink has zero value
 ```
 
@@ -100,8 +100,8 @@ than silently reverting to ordinary floating-point QK.
 ## Validation and benchmarking
 
 ```sh
-ctest --test-dir build -R '^test-bit-attention' --output-on-failure
-build/bin/test-bit-attention --backend CUDA0
+ctest --test-dir build -R '^test-bit-attention' --output-on-failure # CPU数値・モデルとキャッシュ・引数伝播の回帰テストを実行する。
+build/bin/test-bit-attention --backend CUDA0 # GPUがある環境でCUDAカーネルを独立参照値と比較する。
 ```
 
 The kernel test compares against an independent double-precision dense oracle,
@@ -120,8 +120,8 @@ are separate; CUDA compilation is not a GPU runtime test.
 Run matched benchmarks; the benchmark tool records `bit_attn` in its result data:
 
 ```sh
-build/bin/llama-bench -m model.gguf --no-bit-attn -p 512 -n 128 -r 5 -o json
-build/bin/llama-bench -m model.gguf --bit-attn    -p 512 -n 128 -r 5 -o json
+build/bin/llama-bench -m model.gguf --no-bit-attn -p 512 -n 128 -r 5 -o json # 同じ測定条件で指定したAttentionモードの結果をJSONへ記録する。
+build/bin/llama-bench -m model.gguf --bit-attn    -p 512 -n 128 -r 5 -o json # 同じ測定条件で指定したAttentionモードの結果をJSONへ記録する。
 ```
 
 Use the same model, device/offload, cache types, context sizes and warmup policy.
@@ -129,3 +129,15 @@ Also compare perplexity/task quality: comparing speed alone compares different
 mathematical models. The earlier Python/Triton sketches are not dependencies of
 this implementation, and this C++/CUDA code does not make those sketches
 production-ready.
+
+## Line-comment verification
+
+All code added or changed for this feature carries a same-line explanation.
+Untouched upstream code is not reformatted. The checker examines the complete
+feature diff, including C/C++, CUDA, CMake, Python, workflow lines and fenced
+examples. It distinguishes comment markers inside string literals from comments.
+A passing check verifies coverage, not the semantic accuracy of prose.
+
+```sh
+python3 tests/bit-attention-comments.py --base 5265486cb491ea5b160a3d20ca1e105ae5422312 # 追加・変更した全コード行の説明コメントを検査する。
+```

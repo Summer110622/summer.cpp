@@ -226,10 +226,10 @@ llama_context::llama_context(
         cparams.causal_attn = params.attention_type == LLAMA_ATTENTION_TYPE_CAUSAL;
     }
 
-    cparams.bit_attn   = params.bit_attn;
-    if (cparams.bit_attn) {
-        LLAMA_LOG_WARN("%s: experimental BitAttention enabled: Q/K signs only; model quality must be evaluated\n", __func__);
-    }
+    cparams.bit_attn   = params.bit_attn; // 公開コンテキストの設定を内部グラフ設定へ伝える。
+    if (cparams.bit_attn) { // 実験的な二値Attentionを明示的に選んだ場合だけ警告する。
+        LLAMA_LOG_WARN("%s: experimental BitAttention enabled: Q/K signs only; model quality must be evaluated\n", __func__); // 通常Attentionとは数値が変わりモデル品質の検証が必要と通知する。
+    } // この処理または定義のブロックを閉じる。
     cparams.flash_attn = params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED;
     cparams.auto_fa    = params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO;
 
@@ -559,9 +559,9 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
     if (cparams.auto_fa) {
         // BitAttention has its own dispatch and CPU fallback. Preserve the chosen
         // KV layout; a missing standard FA node must not be probed as standard FA.
-        if (!cparams.bit_attn) {
-            resolve(llm_fused_op_flash_attn_probe, cparams.flash_attn);
-        }
+        if (!cparams.bit_attn) { // 二値演算を通常FlashAttentionへ誤置換しないよう通常モードだけを探査する。
+            resolve(llm_fused_op_flash_attn_probe, cparams.flash_attn); // 通常Attention用の融合ノードとバックエンドを解決する。
+        } // この処理または定義のブロックを閉じる。
         cparams.auto_fa = false;
     }
 
@@ -3413,7 +3413,7 @@ static void llama_set_param(struct ggml_tensor * tensor, llama_opt_param_filter 
 }
 
 void llama_context::opt_init(struct llama_model * model, struct llama_opt_params lopt_params) {
-    GGML_ASSERT(!cparams.bit_attn && "BitAttention is inference-only: no backward/STE implementation");
+    GGML_ASSERT(!cparams.bit_attn && "BitAttention is inference-only: no backward/STE implementation"); // 二値パックの逆伝播やSTEが未実装なので学習用途を拒否する。
     GGML_ASSERT(!opt_ctx);
     model->hparams.n_ctx_train = lopt_params.n_ctx_train > 0 ? lopt_params.n_ctx_train : n_ctx();
     const uint32_t n_batch     = std::min(this->n_batch(),  model->hparams.n_ctx_train);
@@ -3663,7 +3663,7 @@ llama_context_params llama_context_default_params() {
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
         /*.ctx_other                   =*/ nullptr,
-        /*.bit_attn                    =*/ false,
+        /*.bit_attn                    =*/ false, // 二値Attentionを既定では無効にする。
     };
 
     return result;
@@ -3674,11 +3674,11 @@ llama_context * llama_init_from_model(
         llama_context_params   params) {
     if (!model) {
         LLAMA_LOG_ERROR("%s: model cannot be NULL\n", __func__);
-        return nullptr;
-    }
+        return nullptr; // 不正なモデル設定ではコンテキストを作成せず戻る。
+    } // この処理または定義のブロックを閉じる。
 
-    if (params.bit_attn && model->split_mode() == LLAMA_SPLIT_MODE_TENSOR) {
-        LLAMA_LOG_ERROR("%s: BitAttention does not support tensor-parallel split mode\n", __func__);
+    if (params.bit_attn && model->split_mode() == LLAMA_SPLIT_MODE_TENSOR) { // 未対応のテンソル並列と二値Attentionの組み合わせを拒否する。
+        LLAMA_LOG_ERROR("%s: BitAttention does not support tensor-parallel split mode\n", __func__); // テンソル並列の分割モードが未対応であることを報告する。
         return nullptr;
     }
 

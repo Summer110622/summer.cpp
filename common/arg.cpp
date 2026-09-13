@@ -1748,13 +1748,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.n_chunks = value;
         }
     ).set_examples({LLAMA_EXAMPLE_IMATRIX, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_RETRIEVAL}));
-    add_opt(common_arg(
-        {"--bit-attn"}, {"--no-bit-attn"},
-        "experimental sign-only Q/K BitAttention (changes model numerics; default: disabled)",
-        [](common_params & params, bool value) {
-            params.bit_attn = value;
-        }
-    ).set_env("LLAMA_ARG_BIT_ATTN"));
+    add_opt(common_arg( // CLIとサーバーで共通の二値Attentionオプションを登録する。
+        {"--bit-attn"}, {"--no-bit-attn"}, // 有効化と明示的な無効化の両方のフラグを公開する。
+        "experimental sign-only Q/K BitAttention (changes model numerics; default: disabled)", // 数値が変わる実験機能であり既定では無効だと説明する。
+        [](common_params & params, bool value) { // 引数パーサーから真偽値を受け取るハンドラを定義する。
+            params.bit_attn = value; // 解釈済みの真偽値を共通パラメータへ保存する。
+        } // この処理または定義のブロックを閉じる。
+    ).set_env("LLAMA_ARG_BIT_ATTN")); // 環境変数からも同じ真偽値を設定できるようにする。
     add_opt(common_arg({ "-fa", "--flash-attn" }, "[on|off|auto]",
                        string_format("set Flash Attention use ('on', 'off', or 'auto', default: '%s')",
                                      llama_flash_attn_type_name(params.flash_attn_type)),

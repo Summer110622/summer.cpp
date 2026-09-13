@@ -956,7 +956,7 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
     allow = allow && tensor->op != GGML_OP_ROPE;
 
     // skip FLASH_ATTN_EXT since the sinks tensor is too small to choose a based based on it
-    allow = allow && tensor->op != GGML_OP_FLASH_ATTN_EXT && tensor->op != GGML_OP_BIT_ATTN_EXT;
+    allow = allow && tensor->op != GGML_OP_FLASH_ATTN_EXT && tensor->op != GGML_OP_BIT_ATTN_EXT; // 融合Attentionの入力と出力のバッファを不適切に再利用しないよう制限する。
 
     if (allow) {
         for (int i = 0; i < GGML_MAX_SRC; i++) {
