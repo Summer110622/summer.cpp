@@ -1,0 +1,34 @@
+name: Routing and attention CPU regressions
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'ggml/**'
+      - 'tests/**'
+      - '.github/workflows/routing-attention.yml'
+permissions:
+  contents: read
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Configure CPU build without network dependencies
+        run: >-
+          cmake -S . -B build-routing
+          -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_CCACHE=OFF
+          -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF
+          -DBUILD_SHARED_LIBS=OFF -DLLAMA_OPENSSL=OFF
+      - name: Compile production library and synthetic regressions
+        run: cmake --build build-routing --target llama test-routing-attention test-routing-attention-model -j 2
+      - name: Test routing, scheduling, attention and end-to-end synthetic inference
+        run: ctest --test-dir build-routing -R '^test-routing-attention' --output-on-failure
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: routing-attention-cpu-results
+          path: build-routing/Testing/Temporary/LastTest.log
+          retention-days: 7
