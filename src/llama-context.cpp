@@ -3,6 +3,7 @@
 #include "ggml.h"
 #include "llama-arch.h"
 #include "llama-graph.h"
+#include "llama-graph-opt.h"
 #include "llama-impl.h"
 #include "llama-batch.h"
 #include "llama-io.h"
@@ -2351,6 +2352,26 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
     if (n_sampling_outputs_max > 1) {
         res += (n_sampling_outputs_max - 1) * n_sampling_nodes_max;
     }
+    const auto & graph_opt = llama_graph_opt_get();
+    uint64_t extra_nodes = 0;
+    if (graph_opt.moe_expert_chunk > 0) {
+        const uint64_t lora_count = loras ? loras->size() : 0;
+        for (uint32_t il = 0; il < model.hparams.n_layer_all; ++il) {
+            const uint64_t active = model.hparams.n_expert_used(il);
+            if (active > 1) {
+                const uint64_t chunks = 1 + (active - 1) / graph_opt.moe_expert_chunk;
+                // Includes views, all activation variants, scales/biases and adapter graphs.
+                extra_nodes += chunks * (128 + 64 * lora_count) + 2 * active;
+            }
+        }
+    }
+    if (graph_opt.attn_query_chunk > 0 && n_tokens > uint32_t(graph_opt.attn_query_chunk)) {
+        const uint64_t chunks = std::min<uint64_t>(LLAMA_ATTN_MAX_QUERY_CHUNKS,
+            1 + (uint64_t(n_tokens) - 1) / graph_opt.attn_query_chunk);
+        extra_nodes += 32 * chunks * model.hparams.n_layer_all;
+    }
+    GGML_ASSERT(extra_nodes <= uint64_t(UINT32_MAX) - res);
+    res += uint32_t(extra_nodes);
     return res;
 }
 
