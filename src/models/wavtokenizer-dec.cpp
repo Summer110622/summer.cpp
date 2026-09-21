@@ -182,7 +182,10 @@ llama_model_wavtokenizer_dec::graph::graph(const llama_model & model, const llm_
                     q = ggml_cont(ctx0, ggml_transpose(ctx0, q));
                     k = ggml_cont(ctx0, ggml_transpose(ctx0, k));
 
-                    ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
+                    GGML_ASSERT(!cparams.bit_attn || q->ne[0] <= INT32_MAX); // 二値スコア演算へ渡す実特徴次元の上限を確認する。
+                    ggml_tensor * kq = cparams.bit_attn // wavtokenizerの明示的なQK行列積をモードに応じて選ぶ。
+                        ? ggml_bit_mul_mat(ctx0, ggml_bit_pack(ctx0, k), ggml_bit_pack(ctx0, q), static_cast<int32_t>(q->ne[0])) // 二値モードではパックしたK/QからXOR/popcountスコアを作る。
+                        : ggml_mul_mat(ctx0, k, q); // 無効時は従来の行列積を使い後続処理を変えない。
 
                     kq = ggml_soft_max_ext(ctx0, kq, nullptr, 1.0f/sqrtf(float(hparams.posnet.n_embd)), 0.0f);
 

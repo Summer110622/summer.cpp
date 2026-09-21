@@ -2208,7 +2208,12 @@ static ggml_backend_buffer_type_t ggml_backend_rpc_device_get_buffer_type(ggml_b
 
 static bool ggml_backend_rpc_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
     GGML_UNUSED(dev);
-    GGML_UNUSED(op);
+    // RPC does not negotiate per-op backend capabilities. Do not send new
+    // BitAttention IDs to an older server or assume its device supports them.
+    // The scheduler can run these experimental ops on the local CPU instead.
+    if (op->op == GGML_OP_BIT_PACK || op->op == GGML_OP_BIT_MUL_MAT || op->op == GGML_OP_BIT_ATTN_EXT) { // 対応演算を交渉できないRPCへ新演算を配送しないよう除外する。
+        return false; // この条件では機能を利用しないことを返す。
+    } // この処理または定義のブロックを閉じる。
     //TODO: call the remote backend and cache the results
     return true;
 }

@@ -189,8 +189,11 @@ ggml_tensor * llama_model_minimax_m3::graph::build_attn_msa_fa(
     ggml_tensor * q = ggml_reshape_4d(ctx0, q_cur, D, Gp, C, R);
     q = ggml_permute(ctx0, q, 0, 2, 3, 1);
 
-    ggml_tensor * o = ggml_flash_attn_ext(ctx0, q, k, v, mask, kq_scale,
-                                          hparams.f_max_alibi_bias, 0.0f);
+    GGML_ASSERT(!cparams.bit_attn || D <= INT32_MAX); // 二値化する際の特徴次元がI32パラメータへ収まるか検査する。
+    ggml_tensor * o = cparams.bit_attn // MiniMax-M3の直接Attention経路にもコンテキスト設定を反映する。
+        ? ggml_bit_attn_ext(ctx0, ggml_bit_pack(ctx0, q), ggml_bit_pack(ctx0, k), v, // 二値モードでは位置処理済みQ/Kをパックして融合演算を作る。
+                mask, nullptr, static_cast<int32_t>(D), kq_scale, hparams.f_max_alibi_bias, 0.0f) // この経路のマスク・実次元・スケール・ALiBiを維持する。
+        : ggml_flash_attn_ext(ctx0, q, k, v, mask, kq_scale, hparams.f_max_alibi_bias, 0.0f); // 無効時には元のFlashAttentionの動作を維持する。
     ggml_prec_set_acc(o, GGML_PREC_F32);
     cb(o, "msa_fattn", il);
 

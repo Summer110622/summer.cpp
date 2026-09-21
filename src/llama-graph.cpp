@@ -2613,7 +2613,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     ggml_tensor * cur;
 
     const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
-    if (use_flash_attn) {
+    const bool use_bit_fused = cparams.bit_attn && kq_b == nullptr && arch != LLM_ARCH_GROK; // 追加スコア変換を壊さない形状とモデルに限り融合二値経路を選ぶ。
+    if (use_bit_fused || (!cparams.bit_attn && use_flash_attn)) { // 二値融合経路か、二値化していない通常FlashAttentionへ進む。
         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
 
         if (v_trans) {
@@ -2621,22 +2622,31 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         }
 
         // this can happen when KV cache is not used (e.g. an embedding model with non-causal attn)
-        if (k->type == GGML_TYPE_F32) {
+        // Bit packing must see the original signs, without F16 underflow to -0.
+        if (!use_bit_fused && k->type == GGML_TYPE_F32) { // 通常FlashAttentionに必要なKey型変換だけを残す。
             k = ggml_cast(ctx0, k, GGML_TYPE_F16);
         }
 
-        if (v->type == GGML_TYPE_F32) {
+        if (!use_bit_fused && v->type == GGML_TYPE_F32) { // 二値経路ではValueの元の精度を保ち通常FAだけを変換する。
             v = ggml_cast(ctx0, v, GGML_TYPE_F16);
         }
 
-        cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
-                                  hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
-        res->add_fused_node({LLM_FUSED_OP_FLASH_ATTN, cur, il});
+        if (use_bit_fused) { // 二値Attentionが選ばれた場合に専用GGML演算を構築する。
+            GGML_ASSERT(q->ne[0] <= INT32_MAX); // パック演算へ渡す実特徴次元がI32の範囲内か検査する。
+            cur = ggml_bit_attn_ext(ctx0, ggml_bit_pack(ctx0, q), ggml_bit_pack(ctx0, k), v, // 位置変換済みQ/Kを符号パックし浮動小数点Vと融合する。
+                    kq_mask, sinks, static_cast<int32_t>(q->ne[0]), kq_scale, hparams.f_max_alibi_bias, // 既存マスク・sink・実次元・スケール・ALiBi設定を引き継ぐ。
+                    hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f); // モデルが要求する場合だけtanhソフトキャップを渡す。
+            cb(cur, "bit_attn", il); // デバッグや評価コールバックから二値演算を識別可能にする。
+        } else { // 直前の条件に該当しない場合の経路へ切り替える。
+            cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias, // 二値Attentionを無効にした場合は既存FlashAttentionを構築する。
+                                      hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f); // 通常経路でも既存モデルのソフトキャップ設定を維持する。
+            res->add_fused_node({LLM_FUSED_OP_FLASH_ATTN, cur, il}); // 通常FlashAttentionだけを既存融合ノードの追跡へ登録する。
 
-        ggml_flash_attn_ext_add_sinks(cur, sinks);
-        GGML_ASSERT(n_kv_max >= 0 && n_kv_max <= INT32_MAX);
-        ggml_flash_attn_ext_set_n_kv_max(cur, static_cast<int32_t>(n_kv_max));
-        ggml_prec_set_acc(cur, GGML_PREC_F32);
+            ggml_flash_attn_ext_add_sinks(cur, sinks); // 通常FlashAttentionのsinkを維持する。
+            GGML_ASSERT(n_kv_max >= 0 && n_kv_max <= INT32_MAX); // キー数上限の整数変換前に有効範囲を検査する。
+            ggml_flash_attn_ext_set_n_kv_max(cur, static_cast<int32_t>(n_kv_max)); // 通常FlashAttentionへ利用可能な最大キー数を伝える。
+            ggml_prec_set_acc(cur, GGML_PREC_F32); // 通常経路の累積精度をF32に維持する。
+        } // この処理または定義のブロックを閉じる。
 
         if (v_mla) {
 #if 0
@@ -2657,7 +2667,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
     } else {
-        ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
+        // Keep model-specific bias/softcap ordering on the unfused path.
+        GGML_ASSERT(!cparams.bit_attn || q->ne[0] <= INT32_MAX); // 非融合二値スコア演算へ渡す実次元の範囲を確認する。
+        ggml_tensor * kq = cparams.bit_attn // モデル固有の後続スコア変換を残して内積だけを選択する。
+            ? ggml_bit_mul_mat(ctx0, ggml_bit_pack(ctx0, k), ggml_bit_pack(ctx0, q), static_cast<int32_t>(q->ne[0])) // 二値モードではパック済みKとQからXOR/popcountスコアを作る。
+            : ggml_mul_mat(ctx0, k, q); // 無効時は既存の浮動小数点行列積を使用する。
         cb(kq, "kq", il);
 
         // note: this op tends to require high floating point range
@@ -2721,6 +2735,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         }
     }
 
+    if (cparams.bit_attn && !cparams.offload_kqv) { // Q/K/Vオフロードが無効なら二値経路もCPU配置に従わせる。
+        ggml_backend_sched_set_tensor_backend(sched, cur, backend_cpu); // 二値Attentionの最終出力ノードをCPUバックエンドへ割り当てる。
+    } // この処理または定義のブロックを閉じる。
     ggml_build_forward_expand(gf, cur);
 
     return cur;

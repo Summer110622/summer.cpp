@@ -358,6 +358,7 @@ struct cmd_params {
     std::vector<int>                 main_gpu;
     std::vector<bool>                no_kv_offload;
     std::vector<llama_flash_attn_type> flash_attn;
+    bool                             bit_attn; // ベンチマークの二値Attention選択を引数設定に保持する。
     std::vector<std::vector<ggml_backend_dev_t>> devices;
     std::vector<std::vector<float>>  tensor_split;
     std::vector<std::vector<llama_model_tensor_buft_override>> tensor_buft_overrides;
@@ -403,6 +404,7 @@ static const cmd_params cmd_params_defaults = {
     /* main_gpu             */ { 0 },
     /* no_kv_offload        */ { false },
     /* flash_attn           */ { LLAMA_FLASH_ATTN_TYPE_AUTO },
+    /* bit_attn             */ false, // 二値Attentionを既定では無効にする。
     /* devices              */ { {} },
     /* tensor_split         */ { std::vector<float>(llama_max_devices(), 0.0f) },
     /* tensor_buft_overrides*/ { std::vector<llama_model_tensor_buft_override>{ { nullptr, nullptr } } },
@@ -474,6 +476,7 @@ static void print_usage(int /* argc */, char ** argv) {
     printf("  -mg, --main-gpu <i>                               (default: %s)\n", join(cmd_params_defaults.main_gpu, ",").c_str());
     printf("  -nkvo, --no-kv-offload <0|1>                      (default: %s)\n", join(cmd_params_defaults.no_kv_offload, ",").c_str());
     printf("  -fa, --flash-attn <on|off|auto>                   (default: %s)\n", join(transform_to_str(cmd_params_defaults.flash_attn, llama_flash_attn_type_name), ",").c_str());
+    printf("  --bit-attn / --no-bit-attn                        experimental sign-only Q/K (default: disabled)\n"); // ベンチマークのヘルプに明示的な有効・無効フラグを表示する。
     printf("  -dev, --device <dev0/dev1/...>                    (default: auto)\n");
     printf("  -lm, --load-mode <auto|none|mmap|mlock|mmap+mlock|dio> (default: %s)\n", join(transform_to_str(cmd_params_defaults.load_mode, llama_load_mode_name), ",").c_str());
     printf("  -lzm, --lazy-mode <on|auto|off>                   (default: %s)\n", join(transform_to_str(cmd_params_defaults.lazy_mode, lazy_mode_str), ",").c_str());
@@ -535,6 +538,7 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
     params.delay                = cmd_params_defaults.delay;
     params.progress             = cmd_params_defaults.progress;
     params.no_warmup            = cmd_params_defaults.no_warmup;
+    params.bit_attn             = cmd_params_defaults.bit_attn; // 二値Attentionの既定値をベンチマーク設定へコピーする。
     params.offline              = cmd_params_defaults.offline;
 
     if (const char * env = getenv("HF_TOKEN")) {
@@ -548,6 +552,10 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
         }
 
         try {
+            if (arg == "--bit-attn" || arg == "--no-bit-attn") { // 二値Attentionの真偽値フラグを通常の数値引数と分けて解釈する。
+                params.bit_attn = arg == "--bit-attn"; // 有効化フラグなら真、無効化フラグなら偽を設定する。
+                continue; // この要素を集計せず次の反復へ進む。
+            } // この処理または定義のブロックを閉じる。
             if (arg == "-h" || arg == "--help") {
                 print_usage(argc, argv);
                 exit(0);
@@ -1216,6 +1224,7 @@ struct cmd_params_instance {
     int                main_gpu;
     bool               no_kv_offload;
     llama_flash_attn_type flash_attn;
+    bool               bit_attn; // 各ベンチマーク構成の二値Attentionモードを保持する。
     std::vector<ggml_backend_dev_t> devices;
     std::vector<float> tensor_split;
     std::vector<llama_model_tensor_buft_override> tensor_buft_overrides;
@@ -1297,6 +1306,7 @@ struct cmd_params_instance {
         cparams.type_v          = type_v;
         cparams.offload_kqv     = !no_kv_offload;
         cparams.flash_attn_type = flash_attn;
+        cparams.bit_attn        = bit_attn; // ベンチマーク構成を実際の推論コンテキストへ反映する。
         cparams.embeddings      = embeddings;
         cparams.op_offload      = !no_op_offload;
         cparams.swa_full        = false;
@@ -1361,6 +1371,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .main_gpu              = */ mg,
                 /* .no_kv_offload         = */ nkvo,
                 /* .flash_attn            = */ fa,
+                /* .bit_attn              = */ params.bit_attn, // 生成した測定構成へ二値Attentionの設定を引き継ぐ。
                 /* .devices               = */ devs,
                 /* .tensor_split          = */ ts,
                 /* .tensor_buft_overrides = */ ot,
@@ -1398,6 +1409,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .main_gpu              = */ mg,
                 /* .no_kv_offload         = */ nkvo,
                 /* .flash_attn            = */ fa,
+                /* .bit_attn              = */ params.bit_attn, // 生成した測定構成へ二値Attentionの設定を引き継ぐ。
                 /* .devices               = */ devs,
                 /* .tensor_split          = */ ts,
                 /* .tensor_buft_overrides = */ ot,
@@ -1435,6 +1447,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .main_gpu              = */ mg,
                 /* .no_kv_offload         = */ nkvo,
                 /* .flash_attn            = */ fa,
+                /* .bit_attn              = */ params.bit_attn, // 生成した測定構成へ二値Attentionの設定を引き継ぐ。
                 /* .devices               = */ devs,
                 /* .tensor_split          = */ ts,
                 /* .tensor_buft_overrides = */ ot,
@@ -1477,6 +1490,7 @@ struct test {
     int                      main_gpu;
     bool                     no_kv_offload;
     llama_flash_attn_type    flash_attn;
+    bool                     bit_attn; // 測定結果に実際に使用したAttentionモードを保持する。
     std::vector<ggml_backend_dev_t> devices;
     std::vector<float>       tensor_split;
     std::vector<llama_model_tensor_buft_override> tensor_buft_overrides;
@@ -1517,6 +1531,7 @@ struct test {
         main_gpu       = inst.main_gpu;
         no_kv_offload  = inst.no_kv_offload;
         flash_attn     = inst.flash_attn;
+        bit_attn       = inst.bit_attn; // 実行した構成の二値化モードを結果へ記録する。
         devices        = inst.devices;
         tensor_split   = inst.tensor_split;
         tensor_buft_overrides = inst.tensor_buft_overrides;
@@ -1580,7 +1595,7 @@ struct test {
             "model_filename", "model_type",     "model_size",    "model_n_params", "n_batch",
             "n_ubatch",       "n_threads",      "cpu_mask",      "cpu_strict",     "poll",
             "type_k",         "type_v",         "n_gpu_layers",  "n_cpu_moe",      "split_mode",
-            "main_gpu",       "no_kv_offload",  "flash_attn",    "devices",        "tensor_split",
+            "main_gpu",       "no_kv_offload",  "flash_attn",    "bit_attn",        "devices",        "tensor_split", // 出力フィールド一覧へ二値Attentionの識別列を追加する。
             "tensor_buft_overrides",            "load_mode",     "lazy_mode",
             "embeddings",
             "no_op_offload",  "no_host",        "fit_target",    "fit_min_ctx",
@@ -1601,7 +1616,7 @@ struct test {
             return INT;
         }
         if (field == "f16_kv" || field == "no_kv_offload" || field == "cpu_strict" ||
-            field == "embeddings" || field == "no_host") {
+            field == "embeddings" || field == "no_host" || field == "bit_attn") { // JSONで二値Attentionの設定値を文字列ではなく真偽値として扱う。
             return BOOL;
         }
         if (field == "avg_ts" || field == "stddev_ts") {
@@ -1673,6 +1688,7 @@ struct test {
                                             std::to_string(main_gpu),
                                             std::to_string(no_kv_offload),
                                             std::to_string((int) flash_attn),
+                                            std::to_string(bit_attn), // 結果の設定値配列へ二値Attentionの状態を追加する。
                                             devices_to_string(devices),
                                             tensor_split_str,
                                             tensor_buft_overrides_str,
@@ -1976,6 +1992,9 @@ struct markdown_printer : public printer {
         }
         if (params.no_kv_offload.size() > 1 || params.no_kv_offload != cmd_params_defaults.no_kv_offload) {
             fields.emplace_back("no_kv_offload");
+        } // この処理または定義のブロックを閉じる。
+        if (params.bit_attn) { // 二値Attentionが有効な測定では表にもモード列を表示する。
+            fields.emplace_back("bit_attn"); // 通常Attentionの測定と混同しないよう識別列を追加する。
         }
         if (params.flash_attn.size() > 1 || params.flash_attn != cmd_params_defaults.flash_attn) {
             fields.emplace_back("flash_attn");

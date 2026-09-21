@@ -17,6 +17,12 @@
 
 </div>
 
+## summer.cpp experimental kernels
+
+[Native BitAttention](docs/experimental/bit-attention.md) adds opt-in sign-only Q/K
+attention on CPU and NVIDIA CUDA (`--bit-attn`). It changes model numerics; it is
+not a lossless FlashAttention replacement or a compressed persistent KV cache.
+
 ## Quick start
 
 A few options to get `llama.cpp` installed on your machine:

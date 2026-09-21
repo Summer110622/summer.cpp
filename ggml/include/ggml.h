@@ -601,6 +601,11 @@ extern "C" {
 
         GGML_OP_GLU,
 
+        // Experimental sign-only Q/K attention. Append to preserve existing op IDs.
+        GGML_OP_BIT_PACK, // 符号パックの演算番号を登録・選択する。
+        GGML_OP_BIT_MUL_MAT, // XOR/popcountによる二値内積行列の演算番号を登録・選択する。
+        GGML_OP_BIT_ATTN_EXT, // online softmax付き融合二値Attentionの演算番号を登録・選択する。
+
         GGML_OP_COUNT,
     };
 
@@ -2484,6 +2489,43 @@ extern "C" {
     //   n_head % ne32      == 0
     //   ne3    % ne33      == 0
     //
+    // Experimental, inference-only binary Q/K operations (not numerically equivalent to SDPA).
+    // Pack x >= 0 as 1, x < 0 as 0, least-significant bit first. Output is I32 with
+    // shape [ceil(D/32), N, H, B]; unused high bits are zero. Float and quantized
+    // inputs are accepted; quantized inputs are explicitly cast to F32 first.
+    GGML_API struct ggml_tensor * ggml_bit_pack( // GGMLグラフへ符号パック演算を追加する。
+            struct ggml_context * ctx, // 演算テンソルを確保するGGMLコンテキストを受け取る。
+            struct ggml_tensor  * x); // 符号パックする入力テンソルを受け取る。
+
+    // Packed K^T Q using D - 2*popcount(K xor Q). Same shape/broadcast rules as
+    // ggml_mul_mat: a=K, b=Q, output F32 [Nk, Nq, Hq, Bq]. Padding is ignored.
+    GGML_API struct ggml_tensor * ggml_bit_mul_mat( // GGMLグラフへ二値内積行列の演算を追加する。
+            struct ggml_context * ctx, // 演算テンソルを確保するGGMLコンテキストを受け取る。
+            struct ggml_tensor  * a, // パック済みKey入力を受け取る。
+            struct ggml_tensor  * b, // パック済みQuery入力を受け取る。
+            int32_t               head_dim); // パディングを除いた実特徴次元を受け取る。
+
+    // Fused online softmax over packed Q/K, keeping V floating point. Q/K are
+    // [ceil(D/32), N, H, B]; V is [Dv, Nk, Hv, Bv]; output F32 [Dv, Hq, Nq, Bq].
+    // GQA/batch broadcasting follows ggml_mul_mat. Mask is an additive F16/F32/
+    // BF16 tensor [>=Nk, >=Nq, Hm, Bm], with heads/batches repeated modulo Hm/Bm.
+    // Callers encode causal/padding/sliding-window positions in mask, including
+    // absolute decode offsets. Mask entries must be finite or -INFINITY.
+    // Sinks: optional F32 vector [Hq], contributes only to the denominator.
+    // Scores: softcap(scale * binary_dot) + alibi_slope * mask.
+    // All-masked rows return zero. No dropout/backward/STE is provided.
+    GGML_API struct ggml_tensor * ggml_bit_attn_ext( // GGMLグラフへonline softmax付き二値Attentionを追加する。
+            struct ggml_context * ctx, // 演算テンソルを確保するGGMLコンテキストを受け取る。
+            struct ggml_tensor  * q, // パック済みQuery入力を受け取る。
+            struct ggml_tensor  * k, // パック済みKey入力を受け取る。
+            struct ggml_tensor  * v, // 情報を保持するValue入力を受け取る。
+            struct ggml_tensor  * mask, // 因果位置とパディングを含む省略可能な加算マスクを受け取る。
+            struct ggml_tensor  * sinks, // softmax分母だけへ寄与する省略可能なF32ベクトルを受け取る。
+            int32_t               head_dim, // パディングを除いた実特徴次元を受け取る。
+            float                 scale, // 二値内積に掛けるロジットスケールを受け取る。
+            float                 max_bias, // ALiBiのヘッド傾斜を制御する値を受け取る。
+            float                 logit_softcap); // ロジットのtanhソフトキャップ幅を受け取る。
+
     GGML_API struct ggml_tensor * ggml_flash_attn_ext(
             struct ggml_context * ctx,
             struct ggml_tensor  * q,

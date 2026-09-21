@@ -1,0 +1,90 @@
+name: Bit attention # Binary-QKカーネルとフロントエンドを検証する。
+
+on: # 本体更新と関連するプルリクエストを検証対象にする。
+  push: # 既定ブランチへ取り込まれた変更も再検証する。
+    branches: [master] # 開発ブランチは下のpull_requestイベントで検証する。
+    paths: # BitAttentionに影響するコードの更新時だけ実行する。
+      - '.github/workflows/bit-attention.yml' # この検証設定の変更を含める。
+      - 'ggml/**' # 演算定義と各バックエンドの変更を含める。
+      - 'src/**' # モデルグラフと推論コンテキストの変更を含める。
+      - 'include/**' # 公開APIの変更を含める。
+      - 'common/**' # CLIとサーバーの共通引数処理を含める。
+      - 'tests/**' # 数値テストと検証補助スクリプトの変更を含める。
+      - 'tools/llama-bench/**' # ベンチマークの設定と出力の変更を含める。
+  pull_request: # レビュー中の変更をマージ前に検証する。
+    paths: # 本体更新時と同じ範囲を対象にする。
+      - '.github/workflows/bit-attention.yml' # 検証手順自身の変更を検証する。
+      - 'ggml/**' # カーネルとバックエンドの変更を検証する。
+      - 'src/**' # 推論グラフの変更を検証する。
+      - 'include/**' # 公開APIの変更を検証する。
+      - 'common/**' # 共通引数処理の変更を検証する。
+      - 'tests/**' # テストコードの変更を検証する。
+      - 'tools/llama-bench/**' # ベンチマークの変更を検証する。
+
+permissions: # 検証ジョブの権限を明示的に制限する。
+  contents: read # ソースを取得するだけでリポジトリの書き換えを禁止する。
+
+defaults: # シェル実行の共通設定を指定する。
+  run: # 各runステップへ適用する。
+    shell: bash # コンテナ内でも同じシェル構文とエラー伝播を使う。
+
+concurrency: # 同一プルリクエストの重複検証を抑える。
+  group: bit-attention-${{ github.ref }} # 参照ごとに実行グループを分ける。
+  cancel-in-progress: true # 新しい変更が来た場合は古い検証を停止する。
+
+jobs: # CPU実行とCUDAコンパイルを独立して検証する。
+  cpu: # GPUなしでカーネルの数値と推論経路を検証する。
+    runs-on: ubuntu-latest # GitHub管理のLinux環境を使用する。
+    timeout-minutes: 20 # 停止したビルドが無制限に実行されることを防ぐ。
+    steps: # ソース保存、ビルド、実行検証の順で進める。
+      - uses: actions/checkout@v4 # 検証対象のソースを取得する。
+        with: # チェックアウトの認証情報の扱いを指定する。
+          persist-credentials: false # 後続コマンドへGit認証情報を残さない。
+      - name: Archive exact test sources # 失敗時も同一ソースで再現できるようにする。
+        run: git archive --format=tar.gz -o "$RUNNER_TEMP/bit-attention-source.tar.gz" HEAD # 追跡済みソースだけを保存しGit認証設定は含めない。
+      - uses: actions/upload-artifact@v4 # 検証したソースを一時的な成果物として保存する。
+        with: # ソース成果物の名前と保持期間を指定する。
+          name: bit-attention-source # 実行IDごとにソース成果物を識別する。
+          path: ${{ runner.temp }}/bit-attention-source.tar.gz # 作成した圧縮アーカイブを保存する。
+          retention-days: 1 # 再現用ソースを長期間保存しない。
+      - name: Check line explanations # 新規・変更コードの説明コメント漏れを検出する。
+        run: | # 機能追加前の固定コミットを読み取り専用で取得する。
+          git fetch --no-tags --depth=1 origin 5265486cb491ea5b160a3d20ca1e105ae5422312 # 比較元のコミットだけを取得する。
+          python3 tests/bit-attention-comments.py --base 5265486cb491ea5b160a3d20ca1e105ae5422312 # ソースと例示コードの全追加行を監査する。
+      - name: Configure # CPUとRPCを含む検証用ビルドを生成する。
+        run: cmake -S . -B build-bit -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_CUDA=OFF -DGGML_RPC=ON -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DLLAMA_OPENSSL=OFF # 特定CPU命令やモデルのダウンロードへ依存しない構成にする。
+      - name: Build kernels, runtime and frontends # 数値テストだけでなく利用経路もコンパイルする。
+        run: cmake --build build-bit --parallel 3 --target test-bit-attention test-bit-attention-model test-bit-attention-args llama-cli llama-server llama-bench # CPUカーネルと各フロントエンドのリンクを検証する。
+      - name: Numerical, model/cache and argument tests # モデル取得なしで三種類の回帰テストを実行する。
+        run: ctest --test-dir build-bit -R '^test-bit-attention' --output-on-failure # 失敗したケースの出力をCIログに残す。
+      - name: Frontend and benchmark smoke tests # 実際の実行ファイルから設定値が反映されることを確認する。
+        run: | # 各コマンドの失敗を次の処理へ持ち越さない。
+          set -euo pipefail # コマンド失敗と未定義変数を検証失敗として扱う。
+          build-bit/bin/llama-cli --help > cli-help.txt # CLIの使用方法を保存する。
+          build-bit/bin/llama-server --help > server-help.txt # サーバーの使用方法を保存する。
+          grep -q -- '--bit-attn' cli-help.txt # CLIからBitAttentionを指定できることを確認する。
+          grep -q -- '--bit-attn' server-help.txt # サーバーからBitAttentionを指定できることを確認する。
+          build-bit/bin/test-bit-attention-model --write-fixture "$RUNNER_TEMP/bit.gguf" # ランダムな小型モデルをローカルに生成する。
+          build-bit/bin/llama-bench -m "$RUNNER_TEMP/bit.gguf" -ngl 0 -p 8 -n 4 -r 1 --bit-attn -o json > bit-bench.json # BitAttention有効時のベンチマーク出力を取得する。
+          build-bit/bin/llama-bench -m "$RUNNER_TEMP/bit.gguf" -ngl 0 -p 8 -n 4 -r 1 -o json > normal-bench.json # 既定の通常Attentionでも同じ経路を実行する。
+          python3 tests/bit-attention-ci.py benchmarks . # 両方のJSON出力に正しいモードが記録されていることを確認する。
+
+  cuda-compile: # GPU実行とは分離してCUDAソースのコンパイルを検証する。
+    runs-on: ubuntu-latest # GPUを要求しないLinuxランナーを使用する。
+    container: nvidia/cuda:12.8.1-devel-ubuntu24.04 # nvccを含む固定バージョンのCUDA環境を使用する。
+    timeout-minutes: 20 # コンパイラ停止時の実行時間を制限する。
+    env: # パッケージ導入時の対話入力を避ける。
+      DEBIAN_FRONTEND: noninteractive # CI中にパッケージ設定の回答待ちを起こさない。
+      TZ: Etc/UTC # タイムゾーンの対話設定を不要にする。
+    steps: # ツール導入からカーネルの個別コンパイルまでを実行する。
+      - name: Install build tools # CMakeとC++コンパイラと検証スクリプトの依存を用意する。
+        run: apt-get update && apt-get install -y --no-install-recommends git cmake ninja-build g++ python3 # 実行に必要なパッケージだけを導入する。
+      - uses: actions/checkout@v4 # CPUテストと同じ変更を取得する。
+        with: # チェックアウトの認証情報を限定する。
+          persist-credentials: false # 後続処理へ書き込み用認証情報を残さない。
+      - name: Register workspace ownership # コンテナのUID差異によるGitの所有者エラーを防ぐ。
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE" # このジョブの作業ディレクトリだけを明示的に許可する。
+      - name: Configure CUDA # GPU検出へ依存せずコンパイル条件を生成する。
+        run: cmake -S . -B build-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=80 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_OPENSSL=OFF # 対象アーキテクチャを指定してコンパイルデータベースを生成する。
+      - name: Compile kernels and CUDA dispatch # 新カーネルと共通呼び出し元の双方を検証する。
+        run: python3 tests/bit-attention-ci.py cuda-compile build-cuda # GPU数値実行や性能測定を行ったとは扱わない。
