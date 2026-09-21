@@ -10,25 +10,49 @@ permissions:
   contents: read
 jobs:
   cpu:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-static
+            os: ubuntu-22.04
+            shared: 'OFF'
+            dynamic: 'OFF'
+            cmake_flags: ''
+          - name: linux-dynamic
+            os: ubuntu-22.04
+            shared: 'ON'
+            dynamic: 'ON'
+            cmake_flags: ''
+          - name: windows-dynamic
+            os: windows-2025
+            shared: 'ON'
+            dynamic: 'ON'
+            cmake_flags: '-DCMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake'
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - name: Configure CPU build without network dependencies
         run: >-
-          cmake -S . -B build-routing
+          cmake -S . -B build-routing -G "Ninja Multi-Config"
           -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_CCACHE=OFF
           -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF
-          -DBUILD_SHARED_LIBS=OFF -DLLAMA_OPENSSL=OFF
+          -DBUILD_SHARED_LIBS=${{ matrix.shared }} -DGGML_BACKEND_DL=${{ matrix.dynamic }}
+          -DLLAMA_OPENSSL=OFF ${{ matrix.cmake_flags }}
       - name: Compile production library and synthetic regressions
-        run: cmake --build build-routing --target llama test-routing-attention test-routing-attention-model -j 2
+        run: cmake --build build-routing --config Release --target llama test-routing-attention test-routing-attention-model -j 2
       - name: Test routing, scheduling, attention and end-to-end synthetic inference
-        run: ctest --test-dir build-routing -R '^test-routing-attention' --output-on-failure
+        run: ctest --test-dir build-routing -C Release -R '^test-routing-attention' --output-on-failure
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: routing-attention-cpu-results
+          name: routing-attention-${{ matrix.name }}-results
           path: build-routing/Testing/Temporary/LastTest.log
           retention-days: 7

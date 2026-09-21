@@ -5,7 +5,9 @@ on:
 
 jobs:
   linux:
-    runs-on: [self-hosted, Linux]
+    # This CPU-only package check does not require a repository-specific runner.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
         with:

@@ -1,5 +1,4 @@
 #include "llama-graph-opt.h"
-#include "ggml-cpu.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 
@@ -20,6 +19,20 @@ static void check(bool condition, const char * message) {
     }
 }
 
+using backend_ptr = std::unique_ptr<ggml_backend, decltype(&ggml_backend_free)>;
+
+static backend_ptr make_cpu_backend(int threads) {
+    // Discover the CPU implementation through the registry, including loadable CPU variants.
+    backend_ptr backend(ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr), ggml_backend_free);
+    check(backend != nullptr, "CPU backend creation failed");
+    auto * reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(backend.get()));
+    auto set_threads = reinterpret_cast<ggml_backend_set_n_threads_t>(
+        ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads"));
+    check(set_threads != nullptr, "CPU thread configuration is unavailable");
+    set_threads(backend.get(), threads);
+    return backend;
+}
+
 struct arena {
     ggml_context * ctx;
     ggml_cgraph * graph;
@@ -32,7 +45,9 @@ struct arena {
     arena(const arena &) = delete;
     arena & operator=(const arena &) = delete;
     void run(int threads) {
-        check(ggml_graph_compute_with_ctx(ctx, graph, threads) == GGML_STATUS_SUCCESS, "CPU graph failed");
+        auto backend = make_cpu_backend(threads);
+        // The CPU backend can execute tensors already allocated by this ggml context.
+        check(ggml_backend_graph_compute(backend.get(), graph) == GGML_STATUS_SUCCESS, "CPU graph failed");
     }
 };
 
@@ -269,7 +284,8 @@ static size_t attention_buffer(int64_t requested) {
     }
     ggml_set_output(out);
     ggml_build_forward_expand(a.graph, out);
-    auto allocator = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
+    auto backend = make_cpu_backend(1);
+    auto allocator = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend.get()));
     check(allocator != nullptr, "allocator creation failed");
     const bool ok = ggml_gallocr_reserve(allocator, a.graph);
     const size_t bytes = ggml_gallocr_get_buffer_size(allocator, 0);
@@ -342,10 +358,8 @@ static std::vector<float> scheduled_pipeline(bool optimized, int threads) {
     }
     ggml_set_output(out);
     ggml_build_forward_expand(a.graph, out);
-    ggml_backend_t backend = ggml_backend_cpu_init();
-    check(backend != nullptr, "CPU backend creation failed");
-    std::unique_ptr<ggml_backend, decltype(&ggml_backend_free)> backend_owner(backend, ggml_backend_free);
-    ggml_backend_cpu_set_n_threads(backend, threads);
+    auto backend_owner = make_cpu_backend(threads);
+    ggml_backend_t backend = backend_owner.get();
     auto * scheduler = ggml_backend_sched_new(&backend, nullptr, 1, 4096, false, true);
     check(scheduler != nullptr, "scheduler creation failed");
     std::unique_ptr<ggml_backend_sched, decltype(&ggml_backend_sched_free)> owner(scheduler, ggml_backend_sched_free);
@@ -388,6 +402,7 @@ static void test_scheduler(int threads) {
 
 int main() {
     try {
+        ggml_backend_load_all(); // Required before CPU discovery in GGML_BACKEND_DL builds.
         test_options();
         for (int threads : {1, 4}) {
             test_scheduler(threads);
