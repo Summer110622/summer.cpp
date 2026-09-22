@@ -13,3 +13,5 @@ LLAMA_SERIAL_EXPERTS=1 ./build/bin/llama-cli -m model.gguf -ngl 999
 ```
 
 The mode is experimental and disabled by default. Its purpose is to reduce simultaneously-live routed-expert intermediate activations; it does not unload expert weights, stream weights from CPU to GPU, change the model's configured Top-K, or guarantee a lower total VRAM footprint on every backend. Floating-point addition order differs from the parallel graph, so bit-exact output is not guaranteed even though the mathematical expression is the same.
+
+The follow-up [routing and attention optimizations](routing-attention-v3.md) replaces the duplicated serial FFN with a shared expert builder. `LLAMA_SERIAL_EXPERTS=1` remains supported; `LLAMA_MOE_EXPERT_CHUNK=N` can select a larger chunk and takes precedence when explicitly set. Options are captured once before graph reservation. The follow-up also adds numerical regression tests and optional normalized Top-K routing/query-chunked non-Flash attention.

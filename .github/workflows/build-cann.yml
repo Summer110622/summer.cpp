@@ -34,6 +34,15 @@ env:
   LLAMA_ARG_LOG_TIMESTAMPS: 1
 
 jobs:
+  # Keep the intentionally disabled workflow valid without claiming a CANN build.
+  cann-disabled:
+    name: CANN disabled (no build performed)
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Explain the disabled status
+        run: echo "::notice::CANN builds remain disabled until dedicated runners are provisioned."
+
 # TODO: this build is disabled to save Github Actions resources (https://github.com/ggml-org/llama.cpp/pull/23705)
 #       in order to enable it again, we have to provision dedicated runners  to run it
 #  openEuler-latest-cann:
