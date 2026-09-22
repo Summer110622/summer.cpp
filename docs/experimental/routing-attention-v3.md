@@ -63,6 +63,14 @@ Output blocks are assembled into their original stream-major positions with depe
 
 This is not a Flash Attention kernel, sparse attention, KV eviction, or an asymptotic reduction in attention FLOPs. It can be slower because of extra launches, packing and smaller matrix multiplications, especially for short sequences. Single-query decode uses the original path.
 
+## 4. Layout-only packing maintenance
+
+`ggml_cont` creates a copy operation even when its input is already contiguous. The chunk builders now use `llama_graph_cont_if_needed` at four layout-only sites: expert IDs, expert weights, attention mask slices, and the attention output permutation.
+
+Contiguous views keep their original data dependency and are not copied. In particular, single-token expert slices and single-head/single-stream mask slices can be contiguous despite padded strides on singleton dimensions. Non-contiguous multi-token IDs and multi-head/multi-stream mask slices still require packing. A one-query or one-head output permutation also needs no data movement.
+
+This helper is **not an isolation copy** and must not replace `ggml_cont` globally: callers that need independent mutable storage must retain their explicit copy. Expert reduction order, full-key masks, softmax guards, output initialization and dependency-linked SET assembly remain unchanged. No new environment setting is required; this maintenance affects the existing opt-in chunk paths only.
+
 ## Validation without external models
 
 ```sh
@@ -71,14 +79,14 @@ cmake -S . -B build-routing \
   -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF \
   -DBUILD_SHARED_LIBS=OFF -DLLAMA_OPENSSL=OFF
 cmake --build build-routing --target llama test-routing-attention test-routing-attention-model -j 2
-ctest --test-dir build-routing -R '^test-routing-attention' --output-on-failure
+ctest --test-dir build-routing -R '^test-routing-attention' --output-on-failure --no-tests=error
 ```
 
-`test-routing-attention` exercises 334 numerical/guard/allocation cases with 1 and 4 CPU threads: extreme logits and ties, K=1/K=E, multiple tokens, strided expert IDs, remainder chunks, warmup subsets, merged/separate projections, biases/scales/LoRA, seven activations, GQA/MQA/MHA, streams, F16/F32 masks, causal/sliding masks, ALiBi, sinks, soft-capping, and real scheduler buffer reuse over changing inputs. Numerical checks use `abs_error <= 2e-5 + 2e-5 * abs(reference)`.
+`test-routing-attention` exercises 341 numerical/guard/allocation cases with 1 and 4 CPU threads: extreme logits and ties, K=1/K=E, multiple tokens, strided expert IDs, remainder chunks, warmup subsets, merged/separate projections, biases/scales/LoRA, seven activations, GQA/MQA/MHA, streams, F16/F32 masks, causal/sliding masks, ALiBi, sinks, soft-capping, and real scheduler buffer reuse over changing inputs. Structural checks verify F32/F16/I32 contiguous offset views, required strided packing, and attention copy-node counts. Scheduler coverage includes 1/11 queries and 1/2 streams. Numerical checks use `abs_error <= 2e-5 + 2e-5 * abs(reference)`.
 
 `test-routing-attention-model` builds a deterministic, **untrained** two-layer Qwen3 MoE model in memory (128 embedding dimensions, 8 experts, Top-3, 4 query/2 KV heads). It exercises the production llama model/context/graph code, two prefills and four single-token decodes, comparing 768 logits for every mode. CTest runs separate baseline/serial/chunk/router/attention/combined processes with Flash Attention both disabled and enabled. These tests need neither a model download nor Python dependencies.
 
-On the development CPU Release build, all 13 CTests passed. The 334 helper/scheduler cases also passed a Debug AddressSanitizer + UndefinedBehaviorSanitizer build with leak detection. Separately compiling PR #2's original `llama-graph.cpp` and running the synthetic model produced identical baseline logits in all four dense/Flash and parallel/serial comparisons. The helper/scheduler tests' maximum absolute difference was `5.96046448e-8`; the synthetic model comparisons' largest difference was `2.38418579e-7`.
+In the initial PR validation, all 13 CTests passed on the development CPU Release build. The 334 helper/scheduler cases also passed a Debug AddressSanitizer + UndefinedBehaviorSanitizer build with leak detection. Separately compiling PR #2's original `llama-graph.cpp` and running the synthetic model produced identical baseline logits in all four dense/Flash and parallel/serial comparisons. The helper/scheduler tests' maximum absolute difference was `5.96046448e-8`; the synthetic model comparisons' largest difference was `2.38418579e-7`.
 
 The allocator-only attention experiment uses F32, 512 queries, 2048 keys, 8 query heads, 2 KV heads, head dimension 32, one stream, no mask, and query chunk 64:
 
@@ -90,3 +98,31 @@ The allocator-only attention experiment uses F32, 512 queries, 2048 keys, 8 quer
 That is **81.90% less for this synthetic graph buffer**, not total process RAM or real-model GPU VRAM. The test allocates/reserves this graph but does not time it. Results can vary with backend and allocator changes.
 
 GPU kernels, quantized real-model accuracy/perplexity, the user's local Qwen3.6-35B-A3B GGUF, total VRAM, and tokens/second remain unmeasured. These opt-in features must not be presented as verified real-model speedups or memory guarantees.
+
+## Maintenance validation (2026-09-22)
+
+Against PR #3 commit `ef9a5ebcc0db59f09d05aac37aac118895cd5022`, the maintenance passed all 13 CTests in both CPU Release and Debug ASan + UBSan builds with leak detection. Both llama and GGML were instrumented. The helper suite now passes 341 numerical/guard/allocation cases; maximum absolute error remains `5.96046448e-8`.
+
+Separately executing the original and maintained binaries with identical options produced bitwise-identical outputs in 12 synthetic-model comparisons: dense/Flash attention times baseline/serial/chunk/router/attention/combined, each with 768 logits. This is evidence for this untrained CPU fixture, not a guarantee for arbitrary models or backends. A mutation that restores unconditional packing is rejected by the new structural tests.
+
+An allocator-only probe of the old and maintained chunk helpers gave:
+
+| Synthetic graph | CONT nodes before / after | Reserved bytes before / after |
+| --- | ---: | ---: |
+| MoE, 1 token, Top-3, expert chunk 1 | 6 / 0 | 148,640 / 148,640 |
+| MoE, 1 token, Top-3, expert chunk 2 | 4 / 0 | 149,024 / 149,024 |
+| MoE, 7 tokens, Top-3, expert chunk 1 | 6 / 6 | 154,528 / 154,528 |
+| Masked attention, 1 stream, query chunk 64 | 16 / 8 | 11,010,048 / 10,551,296 |
+| Masked attention, 2 streams, query chunk 64 | 16 / 16 | 22,020,096 / 22,020,096 |
+
+The MoE probe uses F32, embedding 32, FFN 48 and 8 experts. The attention probe uses F32 Q/K/V and masks, 512 queries, 2048 keys, 8 query heads, 2 KV heads and head dimension 32. Inputs and output are included in these graph reservations. The single-stream masked attention saving is 458,752 bytes (448 KiB, 4.17%) **relative to the previous chunked implementation**, not relative to dense attention. The no-mask 81.90% result above is the earlier dense-to-chunk comparison and is unchanged. No execution latency, total process RAM or GPU VRAM was measured by this probe.
+
+The permanent read-only CI covers Linux static, Linux dynamic, Windows dynamic and Linux Debug ASan/UBSan. It also watches root CMake, `cmake/**` and public headers, cancels superseded runs for the same PR, and fails if CTest discovers no matching tests. To reproduce the sanitizer configuration, add the following to the CPU CMake command and use a separate build directory:
+
+```sh
+-DCMAKE_BUILD_TYPE=Debug \
+-DLLAMA_SANITIZE_ADDRESS=ON -DLLAMA_SANITIZE_UNDEFINED=ON \
+-DGGML_SANITIZE_ADDRESS=ON -DGGML_SANITIZE_UNDEFINED=ON
+```
+
+Run CTest with `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1` and `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`. GPU and quantized real-model performance/accuracy remain unverified; defaults remain off.
