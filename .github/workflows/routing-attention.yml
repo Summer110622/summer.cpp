@@ -2,12 +2,18 @@ name: Routing and attention CPU regressions
 on:
   pull_request:
     paths:
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'include/**'
       - 'src/**'
       - 'ggml/**'
       - 'tests/**'
       - '.github/workflows/routing-attention.yml'
 permissions:
   contents: read
+concurrency:
+  group: routing-attention-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 jobs:
   cpu:
     name: ${{ matrix.name }}
@@ -21,17 +27,28 @@ jobs:
             os: ubuntu-22.04
             shared: 'OFF'
             dynamic: 'OFF'
+            config: Release
             cmake_flags: ''
           - name: linux-dynamic
             os: ubuntu-22.04
             shared: 'ON'
             dynamic: 'ON'
+            config: Release
             cmake_flags: ''
           - name: windows-dynamic
             os: windows-2025
             shared: 'ON'
             dynamic: 'ON'
+            config: Release
             cmake_flags: '-DCMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake'
+          - name: linux-sanitized
+            os: ubuntu-22.04
+            shared: 'OFF'
+            dynamic: 'OFF'
+            config: Debug
+            cmake_flags: >-
+              -DLLAMA_SANITIZE_ADDRESS=ON -DLLAMA_SANITIZE_UNDEFINED=ON
+              -DGGML_SANITIZE_ADDRESS=ON -DGGML_SANITIZE_UNDEFINED=ON
     defaults:
       run:
         shell: bash
@@ -47,9 +64,12 @@ jobs:
           -DBUILD_SHARED_LIBS=${{ matrix.shared }} -DGGML_BACKEND_DL=${{ matrix.dynamic }}
           -DLLAMA_OPENSSL=OFF ${{ matrix.cmake_flags }}
       - name: Compile production library and synthetic regressions
-        run: cmake --build build-routing --config Release --target llama test-routing-attention test-routing-attention-model -j 2
+        run: cmake --build build-routing --config ${{ matrix.config }} --target llama test-routing-attention test-routing-attention-model -j 2
       - name: Test routing, scheduling, attention and end-to-end synthetic inference
-        run: ctest --test-dir build-routing -C Release -R '^test-routing-attention' --output-on-failure
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build-routing -C ${{ matrix.config }} -R '^test-routing-attention' --output-on-failure --no-tests=error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
