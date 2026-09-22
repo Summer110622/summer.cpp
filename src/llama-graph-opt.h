@@ -76,6 +76,13 @@ inline bool llama_moe_topk_softmax_safe(int64_t n_expert, int64_t n_used) {
         n_used >= 1 + (n_expert - 1) / 16384;
 }
 
+// Layout-only packing for read-only inputs/views. Unlike ggml_cont, this is not
+// an isolation copy: preserve the source dependency and let GGML track its lifetime.
+// Singleton dimensions may have padded strides and still be contiguous.
+inline ggml_tensor * llama_graph_cont_if_needed(ggml_context * ctx, ggml_tensor * tensor) {
+    return ggml_is_contiguous(tensor) ? tensor : ggml_cont(ctx, tensor);
+}
+
 struct llama_moe_routing {
     ggml_tensor * ids;
     ggml_tensor * weights;
@@ -102,10 +109,11 @@ ggml_tensor * llama_build_expert_chunks(
     ggml_tensor * result = nullptr;
     for (int64_t first = 0; first < n_active; first += chunk_size) {
         const int64_t count = std::min(chunk_size, n_active - first);
-        // A slot view has gaps between tokens. Pack it for backend-independent indexing.
-        ggml_tensor * chunk_ids = ggml_cont(ctx, ggml_view_2d(ctx, ids,
+        // Multi-token slot views can have gaps. Pack only when needed; decode
+        // views are already contiguous and must not pay for two copy kernels.
+        ggml_tensor * chunk_ids = llama_graph_cont_if_needed(ctx, ggml_view_2d(ctx, ids,
             count, ids->ne[1], ids->nb[1], first * ids->nb[0]));
-        ggml_tensor * chunk_weights = ggml_cont(ctx, ggml_view_3d(ctx, weights,
+        ggml_tensor * chunk_weights = llama_graph_cont_if_needed(ctx, ggml_view_3d(ctx, weights,
             1, count, weights->ne[2], weights->nb[1], weights->nb[2], first * weights->nb[1]));
         ggml_tensor * experts = build_experts(chunk_ids, chunk_weights, count);
         GGML_ASSERT(experts->ne[1] == count && experts->ne[2] == ids->ne[1]);
@@ -138,13 +146,16 @@ ggml_tensor * llama_build_attn_query_chunks(
             q->nb[1], q->nb[2], q->nb[3], first * q->nb[1]);
         ggml_tensor * chunk_mask = nullptr;
         if (mask) {
-            chunk_mask = ggml_cont(ctx, ggml_view_4d(ctx, mask,
+            // A single head/stream slice is contiguous even with padded queries.
+            // Multiple heads/streams retain gaps and still require packing.
+            chunk_mask = llama_graph_cont_if_needed(ctx, ggml_view_4d(ctx, mask,
                 mask->ne[0], count, mask->ne[2], mask->ne[3],
                 mask->nb[1], mask->nb[2], mask->nb[3], first * mask->nb[1]));
         }
         ggml_tensor * chunk = build_attention(chunk_q, chunk_mask);
         GGML_ASSERT(chunk->ne[1] == count && chunk->ne[3] == q->ne[3]);
-        chunk = ggml_cont(ctx, ggml_permute(ctx, chunk, 0, 2, 1, 3));
+        // A one-query or one-head permutation is layout-only, with no copy.
+        chunk = llama_graph_cont_if_needed(ctx, ggml_permute(ctx, chunk, 0, 2, 1, 3));
         chunk = ggml_reshape_4d(ctx, chunk, chunk->ne[0] * chunk->ne[1], count, 1, chunk->ne[3]);
         if (!result) {
             GGML_ASSERT(llama_graph_attn_set_safe(chunk->ne[0], n_queries));
