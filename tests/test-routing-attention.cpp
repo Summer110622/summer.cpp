@@ -97,6 +97,32 @@ static void test_options() {
     ++cases;
 }
 
+// Structural checks catch redundant packing, not just numerically correct copies.
+static void test_packing() {
+    arena a(true);
+    for (const auto type : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_I32}) {
+        auto * backing = ggml_new_tensor_2d(a.ctx, type, 8, 3);
+        auto * row = ggml_view_2d(a.ctx, backing, 3, 1, backing->nb[1], 2 * backing->nb[0]);
+        check(llama_graph_cont_if_needed(a.ctx, row) == row, "contiguous offset view was copied");
+        auto * full = ggml_view_2d(a.ctx, backing, 8, 3, backing->nb[1], 0);
+        check(llama_graph_cont_if_needed(a.ctx, full) == full, "full contiguous view was copied");
+        auto * strided = ggml_view_2d(a.ctx, backing, 3, 3, backing->nb[1], 2 * backing->nb[0]);
+        auto * packed = llama_graph_cont_if_needed(a.ctx, strided);
+        check(packed != strided && packed->op == GGML_OP_CONT && packed->src[0] == strided &&
+              ggml_is_contiguous(packed), "strided rows were not packed");
+    }
+    for (int64_t queries : {int64_t(1), int64_t(3)}) {
+        for (int64_t heads : {int64_t(1), int64_t(4)}) {
+            auto * raw = ggml_new_tensor_4d(a.ctx, GGML_TYPE_F32, 8, queries, heads, 2);
+            auto * permuted = ggml_permute(a.ctx, raw, 0, 2, 1, 3);
+            auto * packed = llama_graph_cont_if_needed(a.ctx, permuted);
+            check(ggml_is_contiguous(packed), "attention output is not contiguous");
+            check((packed == permuted) == (queries == 1 || heads == 1), "incorrect permutation packing");
+        }
+    }
+    ++cases;
+}
+
 static void test_router(int64_t experts, int64_t used, int64_t tokens, int pattern, int threads) {
     arena a;
     auto * logits = ggml_new_tensor_2d(a.ctx, GGML_TYPE_F32, experts, tokens);
@@ -205,7 +231,16 @@ static void test_experts(int activation, bool merged, bool weight_before, int64_
     }
     reference = ggml_cont(a.ctx, reference);
     ggml_build_forward_expand(a.graph, reference);
-    auto * actual = llama_build_expert_chunks(a.ctx, a.graph, ids, weights, active, chunk, build);
+    auto * actual = llama_build_expert_chunks(a.ctx, a.graph, ids, weights, active, chunk,
+        [&](ggml_tensor * route, ggml_tensor * w, int64_t count) {
+            check(ggml_is_contiguous(route) && ggml_is_contiguous(w), "expert inputs must be packed");
+            if (tokens == 1) {
+                check(route->op == GGML_OP_VIEW && w->op == GGML_OP_VIEW, "decode inputs were copied");
+            } else {
+                check(route->op == GGML_OP_CONT, "padded multi-token IDs were not packed");
+            }
+            return build(route, w, count);
+        });
     ggml_build_forward_expand(a.graph, actual);
     a.run(threads);
     close(reference, actual, "expert chunks");
@@ -251,7 +286,16 @@ static void test_attention(int64_t kv_heads, int64_t streams, int mask_kind, boo
     }
     ggml_tensor * sinks = nullptr;
     if (with_sinks) { sinks = ggml_new_tensor_1d(a.ctx, GGML_TYPE_F32, heads); fill(sinks, 1.0f); }
+    int expected_copies = 1; // The dense reference's output permutation.
     auto build = [&](ggml_tensor * query, ggml_tensor * query_mask) {
+        if (query != q) {
+            expected_copies += query->ne[1] > 1 ? 1 : 0; // Real output permutation.
+            if (query_mask) {
+                check(ggml_is_contiguous(query_mask), "attention mask must be packed");
+                check((query_mask->op == GGML_OP_CONT) == (streams > 1), "incorrect mask packing");
+                expected_copies += streams > 1 ? 1 : 0;
+            }
+        }
         return attention_math(a.ctx, query, k, v, query_mask, sinks, softcap, mask ? 4.0f : 0.0f);
     };
     auto * reference = ggml_permute(a.ctx, build(q, mask), 0, 2, 1, 3);
@@ -262,6 +306,11 @@ static void test_attention(int64_t kv_heads, int64_t streams, int mask_kind, boo
         [&](ggml_tensor *) { ++chunks; });
     check(chunks <= LLAMA_ATTN_MAX_QUERY_CHUNKS, "too many query chunks");
     ggml_build_forward_expand(a.graph, actual);
+    int copies = 0;
+    for (int i = 0; i < ggml_graph_n_nodes(a.graph); ++i) {
+        copies += ggml_graph_node(a.graph, i)->op == GGML_OP_CONT ? 1 : 0;
+    }
+    check(copies <= expected_copies, "redundant attention copies in graph");
     a.run(threads);
     close(reference, actual, "query chunks");
 }
@@ -296,10 +345,11 @@ static size_t attention_buffer(int64_t requested) {
 
 
 // Exercise the actual scheduler/allocator, including buffer reuse on repeated input batches.
-static std::vector<float> scheduled_pipeline(bool optimized, int threads) {
+static std::vector<float> scheduled_pipeline(bool optimized, int threads, int64_t queries, int64_t streams) {
     arena a(true);
     constexpr int64_t d = 32, f = 48, e = 8, used = 3, heads = 4, kv_heads = 2;
-    constexpr int64_t queries = 11, streams = 2, tokens = queries * streams, keys = 17;
+    constexpr int64_t keys = 17;
+    const int64_t tokens = queries * streams;
     std::vector<ggml_tensor *> inputs;
     auto input = [&](std::initializer_list<int64_t> shape) {
         std::vector<int64_t> dims(shape);
@@ -388,9 +438,9 @@ static std::vector<float> scheduled_pipeline(bool optimized, int threads) {
     return result;
 }
 
-static void test_scheduler(int threads) {
-    const auto reference = scheduled_pipeline(false, threads);
-    const auto actual = scheduled_pipeline(true, threads);
+static void test_scheduler(int threads, int64_t queries, int64_t streams) {
+    const auto reference = scheduled_pipeline(false, threads, queries, streams);
+    const auto actual = scheduled_pipeline(true, threads, queries, streams);
     check(reference.size() == actual.size(), "scheduled output size differs");
     for (size_t i = 0; i < actual.size(); ++i) {
         const double error = std::fabs(double(reference[i]) - double(actual[i]));
@@ -404,8 +454,13 @@ int main() {
     try {
         ggml_backend_load_all(); // Required before CPU discovery in GGML_BACKEND_DL builds.
         test_options();
+        test_packing();
         for (int threads : {1, 4}) {
-            test_scheduler(threads);
+            for (int64_t queries : {int64_t(1), int64_t(11)}) {
+                for (int64_t streams : {int64_t(1), int64_t(2)}) {
+                    test_scheduler(threads, queries, streams);
+                }
+            }
             for (int64_t tokens : {int64_t(1), int64_t(7)}) {
                 for (int pattern = 0; pattern < 4; ++pattern) {
                     for (int64_t used : {int64_t(1), int64_t(4), int64_t(16)}) {
